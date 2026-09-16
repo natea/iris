@@ -272,8 +272,29 @@ function settleResumeGreeting() {
   resumeGreetingWaiter?.resolve();
 }
 
+// Settings baked into a Live session at connect time. Resuming keeps the old
+// voice and system prompt, so a change here must start a fresh conversation.
+function liveSessionSignature() {
+  return JSON.stringify([
+    process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview",
+    process.env.GEMINI_LIVE_VOICE || "Zephyr",
+    process.env.GEMINI_LIVE_ACCENT || "",
+    userDisplayName(),
+  ]);
+}
+
 function freshResumeHandle() {
-  return resumeHandles.fresh();
+  const signature = liveSessionSignature();
+  if (resumeHandles.stale(Date.now(), signature)) {
+    resumeHandles.clear();
+    emitEvent({
+      type: "log",
+      level: "info",
+      message: "Voice settings changed — the next wake starts a fresh conversation.",
+    });
+    return null;
+  }
+  return resumeHandles.fresh(Date.now(), signature);
 }
 let irisUiContext = {
   tasks: [],
@@ -2869,7 +2890,12 @@ async function startLive({ preserveLogicalStart = false } = {}) {
   // long nap the handle has expired server-side; Google's validity is 2h).
   const handle = freshResumeHandle();
   const resuming = Boolean(handle);
-  if (!resuming) resetHermesGate();
+  if (!resuming) {
+    resetHermesGate();
+    // Handles issued by this connection belong to its voice/prompt settings.
+    resumeHandles.clear();
+    resumeHandles.bind(liveSessionSignature());
+  }
   intentionalClose = false;
   autoSlept = false;
   ai = new GoogleGenAI({ apiKey });

@@ -444,7 +444,8 @@ export default function SetupPanel({
             Preview
           </button>
         </div>
-        <small className="setup-note">Iris's speaking voice. Tap Preview to hear a sample with the accent below (needs a saved Gemini key).</small>
+        <small className="setup-note">Iris's speaking voice. Tap Preview to hear a sample with the accent below (needs a saved Gemini key). A new voice or accent
+          starts a fresh conversation the next time Iris wakes.</small>
       </label>
       {preview.status === "error" ? <p className="setup-error">{preview.message}</p> : null}
       <label className="setup-field">

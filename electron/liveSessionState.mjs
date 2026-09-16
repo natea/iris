@@ -173,6 +173,14 @@ export class ResumeHandleStore {
     this.ttlMs = ttlMs;
     this.handle = null;
     this.updatedAt = 0;
+    this.signature = null;
+  }
+
+  // Records the settings a fresh session was opened with. A resumed session
+  // keeps its original voice and system prompt, so handles are only reusable
+  // while those settings are unchanged.
+  bind(signature) {
+    this.signature = signature ?? null;
   }
 
   update(handle, now = Date.now()) {
@@ -182,8 +190,14 @@ export class ResumeHandleStore {
     return true;
   }
 
-  fresh(now = Date.now()) {
+  fresh(now = Date.now(), signature = undefined) {
+    if (signature !== undefined && this.signature !== null && signature !== this.signature) return null;
     return this.handle && now - this.updatedAt < this.ttlMs ? this.handle : null;
+  }
+
+  // True when a still-valid handle exists but was issued under other settings.
+  stale(now = Date.now(), signature = undefined) {
+    return Boolean(this.fresh(now)) && !this.fresh(now, signature);
   }
 
   age(now = Date.now()) {
@@ -193,6 +207,7 @@ export class ResumeHandleStore {
   clear() {
     this.handle = null;
     this.updatedAt = 0;
+    this.signature = null;
   }
 
   expireForTest() {
