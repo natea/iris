@@ -59,6 +59,12 @@ import { HermesGatewayClient } from "./hermesGatewayClient.mjs";
 import { HermesInteractiveTransport } from "./hermesInteractiveTransport.mjs";
 import { isSleepIntent } from "./sleepIntent.mjs";
 import {
+  accentInstruction,
+  accentOptions,
+  accentReminder,
+  voiceOptions,
+} from "./voiceDialect.mjs";
+import {
   envFlag,
   loadEnvFiles,
   resolveConfigPath,
@@ -433,15 +439,12 @@ function appConfig() {
 }
 
 // ===== Onboarding / Settings =====
-const GEMINI_VOICES = [
-  "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Aoede",
-  "Leda", "Orus", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus",
-];
 const GEMINI_LIVE_MODELS = ["models/gemini-3.1-flash-live-preview"];
 const ALLOWED_CONFIG_KEYS = new Set([
   "GEMINI_API_KEY",
   "GEMINI_LIVE_MODEL",
   "GEMINI_LIVE_VOICE",
+  "GEMINI_LIVE_ACCENT",
   "HERMES_API_URL",
   "API_SERVER_KEY",
   "HERMES_BIN",
@@ -486,6 +489,7 @@ function getFullConfig() {
     geminiApiKeyConfigured: Boolean((process.env.GEMINI_API_KEY || "").trim()),
     geminiModel: process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview",
     geminiVoice: process.env.GEMINI_LIVE_VOICE || "Zephyr",
+    geminiAccent: process.env.GEMINI_LIVE_ACCENT || "",
     hermesUrl: process.env.HERMES_API_URL || "http://127.0.0.1:8642",
     hermesKey: "",
     hermesKeyConfigured: Boolean((process.env.API_SERVER_KEY || "").trim()),
@@ -506,7 +510,8 @@ function getFullConfig() {
     micDevice: process.env.IRIS_MIC_DEVICE || "",
     cameraDevice: process.env.IRIS_CAMERA_DEVICE || "",
     configured: Boolean((process.env.GEMINI_API_KEY || "").trim()),
-    voices: GEMINI_VOICES,
+    voices: voiceOptions(process.env.GEMINI_LIVE_VOICE || "Zephyr"),
+    accents: accentOptions(process.env.GEMINI_LIVE_ACCENT),
     models: ensureIncludes(GEMINI_LIVE_MODELS, process.env.GEMINI_LIVE_MODEL),
     configPath: userConfigPath(),
     // Read-only defaults surfaced in the UI (not editable from settings).
@@ -932,6 +937,8 @@ async function previewVoice(payload = {}) {
   const apiKey = (payload.key || process.env.GEMINI_API_KEY || "").trim();
   if (!apiKey) return { ok: false, error: "Save your Gemini key first." };
   const voiceName = payload.voice || process.env.GEMINI_LIVE_VOICE || "Zephyr";
+  // The draft accent wins (including "" for default) so unsaved choices preview.
+  const accent = payload.accent ?? process.env.GEMINI_LIVE_ACCENT;
   const model = process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview";
   try {
     closePreviewSession();
@@ -942,7 +949,12 @@ async function previewVoice(payload = {}) {
         responseModalities: ["AUDIO"],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
         systemInstruction: {
-          parts: [{ text: "You are a short voice sample. Say exactly the line you are asked to say, nothing more." }],
+          parts: [{
+            text: [
+              "You are a short voice sample. Say exactly the line you are asked to say, nothing more.",
+              accentInstruction(accent),
+            ].filter(Boolean).join("\n"),
+          }],
         },
       },
       callbacks: {
@@ -967,7 +979,8 @@ async function previewVoice(payload = {}) {
     // Send AFTER connect resolves: onopen can fire before the session variable is
     // assigned, so triggering inside onopen would no-op (silent preview).
     previewSession.sendRealtimeInput({
-      text: `Say exactly: Hi, I'm Iris. This is the ${voiceName} voice.`,
+      // Long enough for the accent to be audible, not just the voice timbre.
+      text: `Say exactly: Hi, I'm Iris. This is the ${voiceName} voice. Shall we have a look at what's on your schedule today?`,
     });
     return { ok: true };
   } catch (error) {
@@ -2747,7 +2760,8 @@ function buildLiveConfig(resumeHandleForSession = null) {
             "Automatic idle sleep needs no comment. When a Hermes result wakes Iris, deliver the result directly without another greeting.",
             `When SYSTEM_EVENT_HERMES_COMPLETE arrives, briefly announce the real result and ask whether ${userDisplayName()} wants to discuss it. Resume an interrupted topic only if you can name it from conversation context.`,
             "Keep voice responses natural and short.",
-          ].join("\n"),
+            accentInstruction(process.env.GEMINI_LIVE_ACCENT),
+          ].filter(Boolean).join("\n"),
         },
         ...userContextParts(),
       ],
@@ -2797,9 +2811,13 @@ function sendWelcomeGreeting() {
   // Never inject a stale startup instruction after the user has begun a real
   // turn. Hermes health is reflected by the status UI and must not delay this.
   if (userInputSeenSinceStart) return;
+  // Repeating the accent here anchors it on the very first spoken turn.
   sendLiveText(
-    `SYSTEM_EVENT_SESSION_START: Greet ${userDisplayName()} once in one short sentence, ` +
+    [
+      `SYSTEM_EVENT_SESSION_START: Greet ${userDisplayName()} once in one short sentence,`,
       "then ask what they have in mind. Do not report service status unless asked.",
+      accentReminder(process.env.GEMINI_LIVE_ACCENT),
+    ].filter(Boolean).join(" "),
   );
 }
 

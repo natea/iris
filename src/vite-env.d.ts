@@ -50,6 +50,7 @@ type IrisConfig = {
   geminiApiKeyConfigured: boolean;
   geminiModel: string;
   geminiVoice: string;
+  geminiAccent: string;
   hermesUrl: string;
   hermesKey: string;
   hermesKeyConfigured: boolean;
@@ -70,7 +71,8 @@ type IrisConfig = {
   micDevice: string;
   cameraDevice: string;
   configured: boolean;
-  voices: string[];
+  voices: { value: string; label: string }[];
+  accents: { value: string; label: string }[];
   models: string[];
   configPath: string;
   voiceDuplexMode: string;
@@ -201,7 +203,7 @@ type IrisApi = {
   saveConfig: (updates: Record<string, string>) => Promise<IrisConfig>;
   testGemini: (key?: string) => Promise<IrisTestResult>;
   testHermes: (payload?: { url?: string; key?: string }) => Promise<IrisTestResult>;
-  previewVoice: (payload?: { voice?: string; key?: string }) => Promise<IrisTestResult>;
+  previewVoice: (payload?: { voice?: string; accent?: string; key?: string }) => Promise<IrisTestResult>;
   getHermesHistory: () => Promise<HermesHistoryResult>;
   listHermesSessions: () => Promise<HermesSessionsResult>;
   createHermesSession: () => Promise<{ ok: boolean; id?: string; error?: string }>;
