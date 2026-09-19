@@ -21,7 +21,7 @@ targets:
     info:
       path: Info.plist
       properties:
-        CFBundleDisplayName: Iris Live
+        CFBundleDisplayName: Iris
         NSMicrophoneUsageDescription: "Iris streams your voice to the Gemini Live API so you can talk to the assistant."
         # Scanning the desktop's pairing QR opens iris-link://pair?… directly in
         # this app. The scheme exists so a phone camera never offers to
@@ -62,6 +62,20 @@ targets:
         DEVELOPMENT_TEAM: YA3FM9C24T
         SWIFT_STRICT_CONCURRENCY: minimal
 
+  IrisLivePrototypeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: IrisLivePrototype
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iris.liveprototype.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: YA3FM9C24T
+
   # The gate and the tool-result shapes are a contract with the desktop, so
   # they are unit-tested rather than only exercised by hand on a phone.
   IrisLivePrototypeTests:
@@ -85,9 +99,11 @@ schemes:
       targets:
         IrisLivePrototype: all
         IrisLivePrototypeTests: [test]
+        IrisLivePrototypeUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
         - IrisLivePrototypeTests
+        - IrisLivePrototypeUITests

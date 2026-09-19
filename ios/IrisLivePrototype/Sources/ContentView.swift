@@ -498,131 +498,54 @@ final class LiveSessionController: ObservableObject {
     }
 }
 
-// MARK: - View
+// MARK: - Root
 
+/// Wiring only: the controllers above, the three screens, and the sheets that
+/// must be reachable from anywhere (the pairing confirmation in particular).
 struct ContentView: View {
     @StateObject private var controller = LiveSessionController()
     @StateObject private var pairing = PairingController()
     @StateObject private var runs = RunsController()
     @Environment(\.scenePhase) private var scenePhase
+
     @State private var apiKey: String = KeychainStore.loadKey() ?? ""
     @State private var keySaved: Bool = KeychainStore.loadKey() != nil
     /// Developer fallback only. A paired session's voice is baked into the
     /// token by the Mac, so the phone has no say and does not pretend to.
     @State private var voice: String = "Iapetus"
-    @State private var showUnpairConfirm = false
-    @State private var showDebug = false
+
+    @State private var showSettings = false
+    @State private var showRuns = false
+
+    /// DEBUG-only fake state for screenshots and previews. Always nil in a
+    /// release build; never reaches a controller.
+    private let fixture = PreviewFixture.fromLaunchArguments()
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-
-                if let paired = pairing.paired {
-                    pairedCard(paired)
-                } else {
-                    unpairedControls
-                }
-
-                if !pairing.message.isEmpty {
-                    Text(pairing.message)
-                        .font(.caption)
-                        .foregroundStyle(pairing.messageIsError ? Color.red : Color.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                HStack {
-                    if pairing.paired == nil {
-                        TextField("Voice", text: $voice)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .disabled(controller.isRunning)
-                            .frame(maxWidth: 140)
-                    }
-
-                    Spacer()
-
-                    // Apple's own output picker: lets the tester move audio to
-                    // AirPods by hand, which tells us whether iOS permits the
-                    // route at all when the app cannot force it.
-                    RoutePicker()
-                        .frame(width: 36, height: 36)
-
-                    Button(controller.isRunning ? "Stop" : "Start") {
-                        if controller.isRunning {
-                            controller.stop()
-                        } else {
-                            startSession()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(controller.isRunning ? .red : .accentColor)
-                }
-
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 10, height: 10)
-                    Text(controller.status.rawValue)
-                        .font(.subheadline.weight(.medium))
-                    Spacer()
-                    Text("\(controller.audioChunksReceived) chunks · \(controller.audioBytesReceived / 1024) KB")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                if let brief = controller.pendingProposal {
-                    pendingProposalCard(brief)
-                }
-
-                Text(controller.errorText.isEmpty ? " " : controller.errorText)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-
-                if pairing.paired != nil {
-                    Divider()
-                    RunsSection(controller: runs, announcingRunId: controller.announcingRunId)
-                }
-
-                Divider()
-
-                // Kept, because this is what a tester reads back when
-                // Bluetooth playback misbehaves — but collapsed by default so
-                // the screen stays usable.
-                DisclosureGroup("Debug", isExpanded: $showDebug) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(controller.audioStatus.routeLine)
-                        Text(controller.audioStatus.engineLine)
-                        Text("in \(controller.audioChunksReceived) chunks → scheduled \(controller.audioStatus.buffersScheduled) · dropped \(controller.audioStatus.buffersDropped) · last route event: \(controller.audioStatus.lastRouteChange) · last rebuild: \(controller.audioStatus.lastRebuildReason)")
-                        ForEach(Array(controller.toolLog.suffix(40).enumerated()), id: \.offset) { entry in
-                            Text(entry.element)
-                        }
-                    }
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
-                }
-                .font(.caption)
-
-                Divider()
-
-                transcript
-                    .frame(minHeight: 180)
-            }
-            .padding()
-            }
-            .refreshable { await runs.refresh(notifying: false) }
-            .navigationTitle("Iris Live Probe")
-            .navigationBarTitleDisplayMode(.inline)
+            MainView(
+                session: controller,
+                pairing: pairing,
+                runs: runs,
+                hasDeveloperKey: !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                onToggleSession: toggleSession,
+                onOpenSettings: { showSettings = true },
+                onOpenRuns: { showRuns = true },
+                fixture: fixture
+            )
         }
         .onOpenURL { url in
             pairing.handle(url: url)
         }
         .onAppear {
+            #if DEBUG
+            if let fixture { pairing._previewSeed(desktopName: fixture.pairedName) }
+            switch PreviewFixture.screenFromLaunchArguments() {
+            case "settings": showSettings = true
+            case "runs": showRuns = true
+            default: break
+            }
+            #endif
             // `pairing` is the StateObject SwiftUI owns; the session
             // controller holds no reference back, so there is no cycle.
             controller.onLinkError = { [pairing] error in
@@ -664,156 +587,43 @@ struct ContentView: View {
             runs.notifier.openRunId = nil
             Task { await runs.read(runId) }
         }
-        .sheet(item: $runs.openResult) { result in
+        .sheet(isPresented: $showSettings) {
+            SettingsView(
+                pairing: pairing,
+                session: controller,
+                runs: runs,
+                apiKey: $apiKey,
+                keySaved: $keySaved,
+                voice: $voice
+            )
+        }
+        .sheet(isPresented: $showRuns) {
+            RunsScreen(
+                controller: runs,
+                announcingRunId: controller.announcingRunId,
+                injectedRuns: fixture?.runs
+            )
+        }
+        // Only when Runs is closed (e.g. opened from a notification). While the
+        // Runs sheet is up it presents the result itself.
+        .sheet(item: Binding(
+            get: { showRuns ? nil : runs.openResult },
+            set: { if !showRuns { runs.openResult = $0 } }
+        )) { result in
             RunResultView(sheet: result)
         }
+        // Must work from anywhere in the app, including over Settings or Runs.
         .sheet(item: $pairing.pendingOffer) { offer in
             PairingSheet(offer: offer, pairing: pairing)
         }
-        .confirmationDialog(
-            "Unpair this phone?",
-            isPresented: $showUnpairConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Unpair this phone", role: .destructive) {
-                controller.stop()
-                pairing.unpair()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This deletes the credential stored on this iPhone. To stop it working from the Mac's side too, revoke the device in Iris on the desktop.")
-        }
     }
 
-    // MARK: Pieces
-
-    @ViewBuilder
-    private func pairedCard(_ paired: PairedDesktop) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Image(systemName: "laptopcomputer.and.iphone")
-                Text("Paired with \(paired.desktopName)")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Button("Unpair this phone", role: .destructive) { showUnpairConfirm = true }
-                    .font(.caption)
-            }
-            Text(paired.address)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-            // Two different outages, named as such: a failing request means
-            // the Mac/tailnet is down; hermesReachable:false means the Mac is
-            // up and Hermes is not. Dispatch is refused with the reason, but
-            // plain conversation still works.
-            if let status = pairing.status {
-                if status.hermesReachable {
-                    Text("Iris on the Mac is reachable · Hermes is reachable · \(status.liveModel)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Iris on the Mac is reachable, but Hermes is not responding on it. You can still talk to Iris; sending work to Hermes will be refused until it is running again.")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else if !pairing.statusMessage.isEmpty {
-                Text(pairing.statusMessage)
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Text("Sessions use a single-use token from your Mac. No Gemini key is stored on this phone.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+    private func toggleSession() {
+        if controller.isRunning {
+            controller.stop()
+        } else {
+            startSession()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    @ViewBuilder
-    private var unpairedControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Not paired")
-                .font(.subheadline.weight(.semibold))
-            Text("In Iris on your Mac, open Pair a device and scan the QR code with the iPhone Camera app. Both devices must be on your tailnet.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            DisclosureGroup("Developer fallback: API key") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Only used while this phone is unpaired. A paired phone never holds a Gemini key.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    SecureField("Gemini API key", text: $apiKey)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(controller.isRunning)
-                    if keySaved {
-                        Button("Forget key", role: .destructive) {
-                            KeychainStore.deleteKey()
-                            apiKey = ""
-                            keySaved = false
-                        }
-                        .font(.caption)
-                        .disabled(controller.isRunning)
-                    }
-                }
-                .padding(.top, 4)
-            }
-            .font(.caption)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(controller.lines) { line in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(line.speaker)
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            Text(line.text)
-                                .font(.body)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .id(line.id)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .onChange(of: controller.lines.count) {
-                if let last = controller.lines.last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
-            }
-        }
-    }
-
-    /// The compact indicator the gate's state deserves: while this is on
-    /// screen, nothing has been sent to Hermes yet.
-    @ViewBuilder
-    private func pendingProposalCard(_ brief: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Image(systemName: "hourglass")
-                Text("Waiting for your answer — nothing sent yet")
-                    .font(.caption.weight(.semibold))
-            }
-            Text(brief)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(6)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func startSession() {
@@ -831,106 +641,26 @@ struct ContentView: View {
             controller.start(apiKey: apiKey, voice: voice)
         }
     }
+}
 
-    private var statusColor: Color {
-        switch controller.status {
-        case .idle: return .gray
-        case .authorizing, .connecting: return .orange
-        case .ready: return .green
-        case .closed: return .gray
-        }
+#if DEBUG
+extension PairingController {
+    /// Screenshot/preview dressing only, compiled out of release. It writes a
+    /// placeholder record straight to the published property and never touches
+    /// the Keychain, the Link client or any session path.
+    func _previewSeed(desktopName: String?) {
+        guard let desktopName, paired == nil else { return }
+        paired = PairedDesktop(
+            host: "100.101.102.103",
+            port: 8765,
+            deviceId: "preview",
+            credential: "",
+            desktopName: desktopName
+        )
     }
 }
+#endif
 
-// MARK: - Pairing confirmation sheet
-
-/// The user compares this number with the one on the Mac before anything is
-/// sent. The secret itself is never shown.
-struct PairingSheet: View {
-    let offer: PairingOffer
-    @ObservedObject var pairing: PairingController
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Pair with this Mac?")
-                    .font(.title3.weight(.semibold))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(offer.desktopName)
-                        .font(.headline)
-                    Text(offer.address)
-                        .font(.subheadline.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Confirmation code")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(offer.code)
-                        .font(.system(size: 44, weight: .bold, design: .monospaced))
-                        .kerning(4)
-                    Text("Check that these six digits match the code Iris is showing on the Mac. If they do not match, do not pair.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if pairing.messageIsError && !pairing.message.isEmpty {
-                    Text(pairing.message)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer()
-
-                Button {
-                    Task {
-                        await pairing.confirmPair()
-                        if pairing.paired != nil { dismiss() }
-                    }
-                } label: {
-                    if pairing.isPairing {
-                        ProgressView().frame(maxWidth: .infinity)
-                    } else {
-                        Text("Pair").frame(maxWidth: .infinity)
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(pairing.isPairing)
-
-                Button("Not now", role: .cancel) {
-                    pairing.cancelPending()
-                    dismiss()
-                }
-                .frame(maxWidth: .infinity)
-            }
-            .padding()
-            .navigationBarTitleDisplayMode(.inline)
-        }
-        .interactiveDismissDisabled(pairing.isPairing)
-    }
-}
-
-extension PairingOffer: Identifiable {
-    /// Identifies the sheet without exposing the secret.
-    public var id: String { "\(address)#\(code)" }
-}
-
-#Preview {
+#Preview("Main — unpaired") {
     ContentView()
-}
-
-
-/// System audio-route picker (the AirPlay/Bluetooth output chooser).
-struct RoutePicker: UIViewRepresentable {
-    func makeUIView(context: Context) -> AVRoutePickerView {
-        let view = AVRoutePickerView()
-        view.prioritizesVideoDevices = false
-        return view
-    }
-    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }

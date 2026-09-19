@@ -73,6 +73,9 @@ public actor SessionCoordinator {
 
     // Run tracking
     private var trackedRuns: Set<String> = []
+    private var cyclesSinceUndeliveredCheck = 0
+    /// With a 2 s poll this asks the Mac for unannounced completions every ~6 s.
+    static let undeliveredCheckEveryCycles = 3
     private var pollTask: Task<Void, Never>?
     private var toolTasks: [Task<Void, Never>] = []
     private var closed = false
@@ -339,6 +342,16 @@ public actor SessionCoordinator {
             let wait = backoff > 0 ? backoff : Self.activePollInterval
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             if closed || Task.isCancelled { return }
+            // Runs this session did not dispatch — queued in an earlier session,
+            // still working when this one began — are in nobody's tracked set.
+            // The desktop's undelivered list is the durable source of truth, so
+            // ask it throughout the session, not only at the start. (Observed on
+            // device: a run finished mid-conversation and was never announced.)
+            cyclesSinceUndeliveredCheck += 1
+            if cyclesSinceUndeliveredCheck >= Self.undeliveredCheckEveryCycles {
+                cyclesSinceUndeliveredCheck = 0
+                await loadUndelivered()
+            }
             guard !trackedRuns.isEmpty else { continue }
             var failed = false
             for runId in trackedRuns {
@@ -369,6 +382,9 @@ public actor SessionCoordinator {
 
     private func enqueueAnnouncement(for runId: String, status: String) async {
         guard !announcedRuns.contains(runId) else { return }
+        // Being spoken right now: the periodic undelivered check still lists it
+        // until the turn completes, and it must not be queued a second time.
+        guard pendingAnnouncement != runId else { return }
         guard !announcementQueue.contains(where: { $0.runId == runId }) else { return }
         // The result is fetched before the turn is injected: the model must
         // never be asked to summarize something the phone has not read.

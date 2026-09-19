@@ -49,6 +49,30 @@ opens and is then closed with code **1011** and a reason such as
 server close before `setupComplete` within 2 s — as `authorizationFailed`, which
 the UI reports as an authorization problem and never retries blindly.
 
+## Interface
+
+The app is built for Apple's Liquid Glass design language. Glass is confined to
+the floating control layer — the voice orb, the control bar, the error banner,
+the pending-proposal card — and the transcript underneath it is plain content,
+per Apple's *Adopting Liquid Glass* guidance about not stacking glass on glass
+or wrapping every card in it.
+
+**The deployment target stays at iOS 18.** Every Liquid Glass API is iOS 26+,
+but this app already runs on a real phone, and raising the floor would be a
+regression for a device that has not been updated. Keeping 18 costs exactly one
+file: `GlassSupport.swift` holds the `if #available(iOS 26.0, *)` checks and the
+`.ultraThinMaterial` fallback, and every other view calls `.irisGlass(…)` as if
+glass were always there.
+
+To look at a state that needs a paired Mac, launch with a fixture:
+
+    xcrun simctl launch booted app.iris.liveprototype \
+        -uiPreviewState working -uiPreviewScreen runs
+
+States: `listening`, `speaking`, `working`, `proposal`, `error`. Screens:
+`settings`, `runs`. DEBUG builds only, and it dresses the views without
+touching a controller, a client or the gate.
+
 ## Files
 
 | File | What it does |
@@ -60,10 +84,20 @@ the UI reports as an authorization problem and never retries blindly.
 | `Sources/DispatchGate.swift` | Pure-value port of `electron/hermesGate.mjs` (`LINK_API.md` §6): one proposal at a time, read-back → user turn → claim, the same rejection reasons, a 5-minute TTL. Plus `ApprovalGate`, the same ordering rule for `approve_hermes_action`. No I/O, no clock of its own. |
 | `Sources/ToolRouter.swift` | Executes the eight declared tools and returns *exactly* the JSON of `LINK_API.md` §5, `instructions` strings verbatim. Also `HermesBrief.format` (a port of the desktop's `formatHermesBrief`) and the `SYSTEM_EVENT_*` templates. |
 | `Sources/SessionCoordinator.swift` | Turns Live events into gate transitions, runs tool calls off the audio path, polls active runs on the contract's 2 s cadence with backoff, injects `SYSTEM_EVENT_SESSION_START` and `SYSTEM_EVENT_HERMES_COMPLETE`, and calls `announced` only after the announcement turn completes. Foundation-only. |
-| `Sources/RunsView.swift` | The run list (including desktop-dispatched runs), stop, and the raw stored result. Also the quiet background poll that watches for completions while no session is live. |
+| `Sources/RunsView.swift` | `RunsController`: fetches the run list (including desktop-dispatched runs), stops a run, reads a stored result, and runs the quiet background poll that watches for completions while no session is live. Views live in `RunsScreen.swift`. |
 | `Sources/RunNotifier.swift` | Local notifications for this phone's completed runs, with an honest note about what iOS delivers without push. |
 | `Sources/KeychainStore.swift` | The pairing (host, port, device id, credential) and the fallback API key, both `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, never logged. |
-| `Sources/ContentView.swift` | SwiftUI harness: paired card / pairing sheet, developer-fallback key field, Start/Stop, status dot, the pending-proposal indicator, the runs section, rolling transcript, error line, and a collapsed Debug group holding the route/engine lines and the tool log. |
+| `Sources/ContentView.swift` | `PairingController` and `LiveSessionController`, plus the app root: it owns the three controllers, the three screens and the sheets that must be reachable from anywhere (the `iris-link://` pairing confirmation in particular). No layout of its own. |
+| `Sources/MainView.swift` | The screen the app opens on: aurora, the voice orb, one line of plain-language status, the pending-proposal card, the compact active-runs strip, the transcript, the error banner, and the floating glass control bar (route picker · Runs · Settings). |
+| `Sources/VoiceOrb.swift` | `VoiceState` (idle / connecting / listening / speaking / working / awaiting answer / unavailable) and the one large glass control that *is* start/stop. Animates by state only — there is no audio level to drive it, and none is added. |
+| `Sources/AuroraBackground.swift` | Four blurred radial blobs on a deep-space gradient, drifting on one 24 s Core Animation loop. Honours Reduce Motion and Reduce Transparency. |
+| `Sources/TranscriptView.swift` | The content layer: You / Iris, auto-scrolling, selectable, deliberately **not** in glass. |
+| `Sources/SettingsView.swift` | Pairing status and reachability, unpair, how-to-pair, notification permission, the developer-fallback key and voice (unpaired only), and the collapsible Debug section with the raw last error. |
+| `Sources/RunsScreen.swift` | The run list on its own screen — Active / Finished, icon **and** colour, origin, relative times, pull to refresh, stop, and the result reader with selection and share. Also `ActiveRunsStrip` for the main screen. |
+| `Sources/PairingSheet.swift` | The six-digit confirmation raised by an `iris-link://pair` scan. Presented from the root so it works over any screen. |
+| `Sources/ErrorBanner.swift` | Maps known raw failures (`Socket receive ended: …`, `Closed (code …)`) to one plain sentence and shows it as a dismissible banner. Unknown text passes through untouched; the raw string stays in Settings → Debug. |
+| `Sources/GlassSupport.swift` | The only place Liquid Glass is gated. `.irisGlass(_:in:)` → `glassEffect(_:in:)` on iOS 26, `.ultraThinMaterial` before it, an opaque surface under Reduce Transparency; plus `GlassContainer` (`GlassEffectContainer`), `.irisGlassButtonStyle()` (`.glass` / `.glassProminent`) and the `AVRoutePickerView` wrapper. |
+| `Sources/PreviewFixture.swift` | DEBUG-only fake state for previews and screenshots, injected into the **views** via `-uiPreviewState <name>` / `-uiPreviewScreen settings\|runs`. Never reaches a controller, and the launch arguments are not read in a release build. |
 | `Sources/IrisLivePrototypeApp.swift` | `@main` app entry. |
 | `Tools/main.swift` | macOS CLI probe — reuses `LiveClient.swift`, reads the key from `~/.iris/.env`, sends one text turn, counts audio bytes. |
 | `Tools/run-probe.sh` | Builds and runs the probe. |
