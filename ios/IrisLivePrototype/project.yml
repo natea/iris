@@ -35,6 +35,9 @@ targets:
         # interface, which is not the immediate local network, so this prompt is
         # not expected to appear. Declared anyway: if iOS ever does classify a
         # tailnet peer as local, the alternative is a silent failure.
+        # Keeps an ACTIVE conversation alive when the app is backgrounded or the
+        # phone is locked. iOS still refuses to START capture from the background.
+        UIBackgroundModes: [audio]
         NSLocalNetworkUsageDescription: "Iris connects to the Iris app on your Mac over your private Tailscale network to start voice sessions."
         # PROTOTYPE ONLY. Observed on device: iOS blocks plain HTTP to a Tailscale
         # IP with NSURLErrorAppTransportSecurityRequiresSecureConnection (-1022);

@@ -13,6 +13,7 @@
 		30C24039DA90DFE03E075F90 /* ToolRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3852C1772D95F3A6EC9237BE /* ToolRouterTests.swift */; };
 		557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4189F82A2B6C03639E03D5A1 /* LiveClient.swift */; };
 		5902882E93962A4CF6C1E5D7 /* RunsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8C241185697D6C0DEF8682F /* RunsView.swift */; };
+		5CEC651FA6611B33169313D2 /* BackgroundSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66AEFEC3D5F04AD54FEAA2D5 /* BackgroundSession.swift */; };
 		72B953FD5F4EB16F8700BFA7 /* RunNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 025FEF6CACEBD7DF8AAC87CE /* RunNotifier.swift */; };
 		76D237D2589D1C516C5D2B2F /* LinkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2BE592157D9D352AB0E03FA /* LinkClient.swift */; };
 		8049F0B862DB3E0EB3CB0C2C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8261FF5C0D663124876807 /* ContentView.swift */; };
@@ -42,6 +43,7 @@
 		42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeLinkService.swift; sourceTree = "<group>"; };
 		570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisLivePrototypeApp.swift; sourceTree = "<group>"; };
 		5E8775E3B82E471D52AED945 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
+		66AEFEC3D5F04AD54FEAA2D5 /* BackgroundSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundSession.swift; sourceTree = "<group>"; };
 		9E9D8390F9F9C32CDD0A0709 /* LinkTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTasks.swift; sourceTree = "<group>"; };
 		A2BE592157D9D352AB0E03FA /* LinkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkClient.swift; sourceTree = "<group>"; };
 		A321262959C14EB0E6390036 /* IrisLivePrototype.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = IrisLivePrototype.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -87,6 +89,7 @@
 			isa = PBXGroup;
 			children = (
 				5E8775E3B82E471D52AED945 /* AudioEngine.swift */,
+				66AEFEC3D5F04AD54FEAA2D5 /* BackgroundSession.swift */,
 				DD8261FF5C0D663124876807 /* ContentView.swift */,
 				D9EBD17A6B834DB2DCC6813D /* DispatchGate.swift */,
 				570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */,
@@ -185,6 +188,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				306F17CF209EA9FD83960288 /* AudioEngine.swift in Sources */,
+				5CEC651FA6611B33169313D2 /* BackgroundSession.swift in Sources */,
 				8049F0B862DB3E0EB3CB0C2C /* ContentView.swift in Sources */,
 				D985CC56BA83BB1A3BBAB852 /* DispatchGate.swift in Sources */,
 				0450E9051ABA8EBDFE8DADE4 /* IrisLivePrototypeApp.swift in Sources */,

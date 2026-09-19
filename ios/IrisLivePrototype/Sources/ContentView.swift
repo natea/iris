@@ -653,6 +653,7 @@ struct ContentView: View {
         .onChange(of: controller.isRunning) { _, running in
             // The session's own 2 s poll replaces the quiet background watch.
             if running { runs.stopPolling() } else { runs.startPolling() }
+            if running { BackgroundSession.begin { controller.stop() } } else { BackgroundSession.end() }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active, pairing.paired != nil else { return }
