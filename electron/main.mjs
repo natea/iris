@@ -58,6 +58,8 @@ import {
 import { HermesGatewayClient } from "./hermesGatewayClient.mjs";
 import { HermesInteractiveTransport } from "./hermesInteractiveTransport.mjs";
 import { isSleepIntent } from "./sleepIntent.mjs";
+import { HERMES_FUNCTION_DECLARATIONS } from "./hermesTools.mjs";
+import { buildMobileLiveConfig } from "./mobileSession.mjs";
 import { createPairingStore } from "./pairingStore.mjs";
 import { createIrisLinkServer } from "./irisLinkServer.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
@@ -1019,7 +1021,11 @@ function hermesSessionId() {
   return (process.env.IRIS_HERMES_SESSION || "iris-voice").trim() || "iris-voice";
 }
 
-async function submitHermesTask({ task, urgency = "normal" }) {
+// `origin` records WHO dispatched: "desktop", or "device:<deviceId>" for a run
+// a paired phone sent through Iris Link. It changes nothing about how the task
+// is sent — same pinned session, same safety instructions, same registry — and
+// only decides who announces the completion.
+async function submitHermesTask({ task, urgency = "normal", origin = "desktop" }) {
   if (!task || !String(task).trim()) {
     return { status: "error", error: "Task is required." };
   }
@@ -1046,6 +1052,20 @@ async function submitHermesTask({ task, urgency = "normal" }) {
     });
     if (run.session_id && run.session_id !== sessionId) {
       writeUserConfig({ IRIS_HERMES_SESSION: run.session_id });
+    }
+    if (run.run_id) {
+      if (runRegistry.get(run.run_id)) runRegistry.update(run.run_id, { origin });
+      else {
+        runRegistry.start({
+          runId: run.run_id,
+          task: cleanTask,
+          sessionId,
+          urgency,
+          status: String(run.status || "started"),
+          transport: "tui_gateway",
+          origin,
+        });
+      }
     }
     return {
       status: run.status || "started",
@@ -1077,6 +1097,7 @@ async function submitHermesTask({ task, urgency = "normal" }) {
     sessionId,
     urgency,
     status: String(run.status || "started"),
+    origin,
   });
   emitEvent({
     type: "hermes_task_update",
@@ -1090,6 +1111,7 @@ async function submitHermesTask({ task, urgency = "normal" }) {
   return {
     status: "started",
     run_id: runId,
+    origin,
     message: "Hermes has started the task.",
     instructions:
       "Say ONE short acknowledgement (e.g. 'On it — Hermes is handling that now.'). The task has only STARTED: you have NO result yet. Do not describe, predict, or summarize any outcome until SYSTEM_EVENT_HERMES_COMPLETE arrives or get_hermes_task_status returns a terminal status.",
@@ -2376,6 +2398,10 @@ async function recoverHermesRuns() {
       (entry) =>
         TERMINAL_RUN_STATUSES.has(entry.status.toLowerCase()) &&
         !entry.announcedAt &&
+        // A phone-dispatched run's announcement belongs to that phone and is
+        // tracked by its own announced/undelivered handshake; replaying it
+        // here would re-emit it on every desktop launch, forever.
+        !String(entry.origin || "desktop").startsWith("device:") &&
         (entry.output || entry.error),
     )
     .slice(0, 10);
@@ -2391,6 +2417,12 @@ async function recoverHermesRuns() {
 
 function announceHermesCompletion({ runId, task, status, output }) {
   const wakingFromSleep = !liveSession;
+  const entry = runRegistry.get(runId);
+  // A run a paired phone dispatched belongs to the phone: the phone announces
+  // it. The desktop still shows the task card (the event below), but it must
+  // not wake the Mac or speak a result the user is already hearing in their
+  // hand. Desktop-origin runs are untouched.
+  const ownedByDevice = String(entry?.origin || "desktop").startsWith("device:");
   const eventText = formatHermesCompletionEvent({
     runId,
     status,
@@ -2405,8 +2437,11 @@ function announceHermesCompletion({ runId, task, status, output }) {
     task,
     status,
     output,
-    session_id: runRegistry.get(runId)?.sessionId || hermesSessionId(),
+    origin: entry?.origin || "desktop",
+    session_id: entry?.sessionId || hermesSessionId(),
   });
+
+  if (ownedByDevice) return;
 
   if (liveSession) {
     // Tracked until a turn completes: if the connection dies before Iris
@@ -2465,144 +2500,9 @@ if (process.env.IRIS_TEST_HOOKS === "1") {
 }
 
 function buildHermesTools() {
-  return [
-    {
-      functionDeclarations: [
-        {
-          name: "check_hermes_status",
-          description:
-            "Check whether Hermes is reachable and ready. Call immediately when the user asks about Hermes connectivity; this is read-only and needs no confirmation.",
-          parameters: { type: "object", properties: {} },
-        },
-        {
-          name: "propose_hermes_task",
-          description:
-            "STEP 1 of dispatching work to Hermes. Use ONLY when the user explicitly asks Iris to use, ask, send, or delegate work to Hermes. This stages a complete brief but does not send it. Never use it for ordinary conversation, Google Search, memory/brain retrieval, status checks, or Iris UI controls. After this call, briefly read back the goal, ask whether to send it, and end the turn.",
-          parameters: {
-            type: "object",
-            properties: {
-              goal: {
-                type: "string",
-                description:
-                  "What the user wants Hermes to accomplish. Preserve concrete details the user supplied.",
-              },
-              context: {
-                type: "string",
-                description:
-                  "Only context explicitly supplied by the user or established in this conversation, including user-supplied file paths or named tools.",
-              },
-              constraints: {
-                type: "array",
-                items: { type: "string" },
-                description: "User-supplied limits, deadlines, budgets, exclusions, or safety requirements.",
-              },
-              acceptance_criteria: {
-                type: "array",
-                items: { type: "string" },
-                description: "Observable conditions that make the work complete.",
-              },
-              output_format: {
-                type: "string",
-                description: "The requested result format, if the user specified one.",
-              },
-              urgency: {
-                type: "string",
-                enum: ["low", "normal", "high"],
-                description: "Dispatch priority.",
-              },
-            },
-            required: ["goal"],
-          },
-        },
-        {
-          name: "submit_hermes_task",
-          description:
-            "Send the exact staged Hermes proposal. Call only when the meaning of the user's latest response clearly authorizes sending after the readback; confirmation has no required wording. If intent is ambiguous, ask naturally instead of calling. Never restage an unchanged confirmed proposal.",
-          parameters: {
-            type: "object",
-            properties: {
-              proposal_id: {
-                type: "string",
-                description:
-                  "The proposal_id returned by propose_hermes_task. It cannot be replaced or edited.",
-              },
-            },
-            required: ["proposal_id"],
-          },
-        },
-        {
-          name: "discard_hermes_proposal",
-          description:
-            "Discard an unsent staged Hermes proposal when the user's response means they decline or cancel it. Interpret intent conversationally; no particular rejection phrase is required. This does not stop a task that was already submitted.",
-          parameters: {
-            type: "object",
-            properties: {
-              proposal_id: {
-                type: "string",
-                description: "The proposal_id returned by propose_hermes_task.",
-              },
-            },
-            required: ["proposal_id"],
-          },
-        },
-        {
-          name: "get_hermes_task_status",
-          description:
-            "Read the current status or final output of a Hermes run. Call immediately when asked how a run is going; no confirmation is needed. Report only returned status/output and never invent progress.",
-          parameters: {
-            type: "object",
-            properties: { run_id: { type: "string" } },
-            required: ["run_id"],
-          },
-        },
-        {
-          name: "stop_hermes_task",
-          description:
-            "Stop an active Hermes run when the user clearly asks to stop or cancel it. Execute directly without an additional confirmation.",
-          parameters: {
-            type: "object",
-            properties: { run_id: { type: "string" } },
-            required: ["run_id"],
-          },
-        },
-        {
-          name: "approve_hermes_action",
-          description:
-            "Resolve a real pending Hermes approval only after Iris has described the command and the user explicitly chose once, session, always, or deny in their own turn. The app verifies that the spoken answer matches the choice.",
-          parameters: {
-            type: "object",
-            properties: {
-              run_id: { type: "string" },
-              choice: { type: "string", description: "once, session, always, or deny" },
-            },
-            required: ["run_id", "choice"],
-          },
-        },
-        {
-          name: "respond_hermes_interaction",
-          description:
-            "Resume a Hermes clarification or full-protocol approval after the user answered in their own turn. Pass the exact run_id, interaction_id, and interaction_type from SYSTEM_EVENT_HERMES_INTERACTION_REQUIRED. For approval also pass choice. Do not use for sudo/password/secret prompts: those are secure UI-only.",
-          parameters: {
-            type: "object",
-            properties: {
-              run_id: { type: "string" },
-              interaction_id: { type: "string" },
-              interaction_type: {
-                type: "string",
-                enum: ["clarify", "approval"],
-              },
-              choice: {
-                type: "string",
-                enum: ["once", "session", "always", "deny"],
-                description: "Required only for approval.",
-              },
-            },
-            required: ["run_id", "interaction_id", "interaction_type"],
-          },
-        },
-      ],
-    },
-  ];
+  // A deep copy per call: the Live SDK normalizes schemas in place, and these
+  // declarations are now shared with the mobile session builder.
+  return [{ functionDeclarations: structuredClone(HERMES_FUNCTION_DECLARATIONS) }];
 }
 
 function buildIrisUiTools() {
@@ -3851,6 +3751,13 @@ function getPairingStore() {
 
 // Ephemeral tokens are what let the phone hold a credential that expires in
 // minutes instead of a Gemini key that has to be rotated everywhere.
+// Optional: an accent line for the phone's prompt, from the same setting the
+// Settings panel already surfaces. Empty unless the user set one.
+function mobileAccentInstruction() {
+  const accent = String(process.env.GEMINI_LIVE_ACCENT || "").trim();
+  return accent ? `Speak English with a ${accent} accent.` : "";
+}
+
 async function mintGeminiToken() {
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
   if (!apiKey) throw new Error("No Gemini API key is configured.");
@@ -3872,33 +3779,35 @@ async function mintGeminiToken() {
       // the session needs must be baked in here.
       liveConnectConstraints: {
         model,
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: process.env.GEMINI_LIVE_VOICE || "Zephyr" },
-            },
-          },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          systemInstruction: {
-            parts: [
-              {
-                text: [
-                  `You are Iris, the realtime voice assistant for ${userDisplayName()}, speaking with them on their phone.`,
-                  `${userDisplayName()} speaks English. Always respond in English, and interpret unclear audio as English.`,
-                  "Keep voice responses natural and short.",
-                  "You cannot dispatch work to Hermes from the phone yet. If asked, say that plainly rather than guessing.",
-                ].join("\n"),
-              },
-            ],
-          },
-        },
+        // Built by electron/mobileSession.mjs from the desktop's own Hermes
+        // tool schemas and prompt rules, so the phone's Iris behaves like the
+        // desktop's. Verified against the real token endpoint: tools,
+        // sessionResumption and both transcription fields are accepted.
+        config: buildMobileLiveConfig({
+          userName: userDisplayName(),
+          voice: process.env.GEMINI_LIVE_VOICE || "Zephyr",
+          accentInstruction: mobileAccentInstruction(),
+          contextParts: userContextParts(),
+        }),
       },
     },
   });
   if (!token?.name) throw new Error("Gemini returned no token name.");
   return { token: token.name, expiresAt, newSessionExpiresAt, model };
+}
+
+// One shape for every task the phone sees, in the snake_case the rest of the
+// Link API uses.
+function linkTaskSummary(entry) {
+  return {
+    run_id: entry.runId,
+    task: entry.task,
+    status: entry.status,
+    origin: entry.origin || "desktop",
+    created_at: entry.createdAt,
+    updated_at: entry.updatedAt,
+    announced_at: entry.announcedAt || 0,
+  };
 }
 
 async function startIrisLink() {
@@ -3921,6 +3830,94 @@ async function startIrisLink() {
   const server = createIrisLinkServer({
     pairingStore: getPairingStore(),
     mintGeminiToken,
+    // The phone's high-level task API. Every handler goes through the SAME
+    // function the desktop's own voice session calls, so the pinned session,
+    // the safety instructions, the memory key, the run registry and the
+    // desktop task card all apply. The desktop's confirmation gate
+    // (claimConfirmedProposal) is deliberately NOT consulted or consumed here:
+    // it guards the desktop's Live session, and a phone running its own gate
+    // must not be able to spend or weaken it.
+    tasks: {
+      dispatch: async ({ task, urgency, deviceId }) => {
+        const result = await submitHermesTask({
+          task,
+          urgency,
+          origin: `device:${deviceId}`,
+        });
+        if (!result || result.status === "error") {
+          return { error: "dispatch_failed", message: result?.error || "Dispatch failed." };
+        }
+        return result;
+      },
+      list: ({ deviceId, undelivered }) => {
+        const sessionId = hermesSessionId();
+        const mine = `device:${deviceId}`;
+        return runRegistry
+          .list({ sessionId })
+          .filter((entry) => {
+            if (!undelivered) return true;
+            // Undelivered = finished, dispatched by THIS phone, and not yet
+            // acknowledged through POST /link/tasks/:id/announced.
+            return (
+              TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase()) &&
+              entry.origin === mine &&
+              !entry.announcedAt
+            );
+          })
+          .slice(0, 50)
+          .map((entry) => linkTaskSummary(entry));
+      },
+      get: async ({ runId }) => {
+        const entry = runRegistry.get(runId);
+        if (!entry) return { error: "task_unknown" };
+        const status = await getHermesTaskStatus({ run_id: runId });
+        return { ...linkTaskSummary(entry), ...status, run_id: runId };
+      },
+      result: async ({ runId }) => {
+        const entry = runRegistry.get(runId);
+        if (!entry) return { ok: false, error: "task_unknown" };
+        if (!TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase())) {
+          return { ok: false, error: "task_not_finished" };
+        }
+        const stored = await readHermesTaskResult({ run_id: runId });
+        if (!stored?.ok) return { ok: false, error: "result_unavailable" };
+        return {
+          ok: true,
+          run_id: runId,
+          task: stored.task || entry.task,
+          status: stored.status || entry.status,
+          output: stored.output,
+          instructions: stored.instructions,
+        };
+      },
+      stop: async ({ runId }) => {
+        if (!runRegistry.get(runId)) return { ok: false, error: "task_unknown" };
+        const result = await stopHermesTask({ run_id: runId });
+        return { status: String(result?.status || "stopping") };
+      },
+      // Driven with trustedUi because the phone, like the desktop's approval
+      // buttons, has already collected an explicit human decision; it is
+      // required to run the same describe-then-wait gate first.
+      approve: async ({ runId, decision }) => {
+        if (!runRegistry.get(runId)) return { ok: false, error: "task_unknown" };
+        const result = await approveHermesAction(
+          { run_id: runId, choice: decision },
+          { trustedUi: true },
+        );
+        if (result?.status === "blocked") {
+          return { ok: false, error: "approval_not_pending", message: result.error };
+        }
+        return { ok: true };
+      },
+      markAnnounced: ({ runId }) => {
+        if (!runRegistry.get(runId)) return { ok: false, error: "task_unknown" };
+        runRegistry.markAnnounced(runId);
+        return { ok: true };
+      },
+    },
+    // /link/status used to relay a cached flag that could be minutes stale and
+    // told the phone "agent unreachable" while Hermes was fine.
+    checkHermesReachable: async () => (await checkHermesStatus()).reachable,
     hermes: {
       baseUrl: hermesBaseUrl(),
       getApiKey: () => process.env.API_SERVER_KEY || "",

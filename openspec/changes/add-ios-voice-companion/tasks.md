@@ -11,7 +11,7 @@
 - [x] 2.1 Add the Iris Link service to the Electron app, bound to the Tailscale address only, with a token endpoint that mints Gemini ephemeral tokens for a paired device — verify a paired client receives a token, an unpaired request is refused, and the port does not listen on other interfaces
 - [x] 2.2 Implement per-device credential issuance and storage on the desktop — verify two paired devices receive distinct credentials
 - [x] 2.3 Add the "Pair a device" panel with a QR code carrying a one-time, short-lived payload — verify the payload expires unused and cannot pair a second device
-- [ ] 2.4 Add the paired-device list with names, last-seen times, and revoke — verify a revoked credential is refused on its next request
+- [x] 2.4 Add the paired-device list with names, last-seen times, and revoke — verify a revoked credential is refused on its next request
 - [x] 2.5 Write unit tests for pairing issue/expire/revoke in `test/` alongside the existing suites — verify `npm test` covers the refusal paths
 - [ ] 2.6 Rate-limit authenticated Iris Link routes per device (token minting and run creation especially) and keep a per-device audit log of dispatched runs — verify a burst beyond the limit is refused with a distinct error and that a dispatched run appears in the log with its device id
 - [ ] 2.7 Serve Iris Link over HTTPS on the Mac's MagicDNS name with a `tailscale cert` certificate, put that hostname in the pairing QR, and have the phone accept only `*.ts.net` hosts — verify the iOS app pairs and fetches a token with no App Transport Security exception in its Info.plist
@@ -25,7 +25,7 @@
 ## 4. iOS: session core
 
 - [ ] 4.1 Create the SwiftUI app target with microphone and notification permission flows — verify a refused permission shows the explanation path, not a broken session
-- [ ] 4.2 Implement pairing on the phone: register the `iris-link://` scheme, redeem a scanned offer with Iris Link, show the 6-digit code for comparison, and store the device credential in the Keychain — verify scanning the desktop QR opens the app, the device appears in the desktop list, and a revoked device returns to the pairing screen
+- [x] 4.2 Implement pairing on the phone: register the `iris-link://` scheme, redeem a scanned offer with Iris Link, show the 6-digit code for comparison, and store the device credential in the Keychain — verify scanning the desktop QR opens the app, the device appears in the desktop list, and a revoked device returns to the pairing screen
 - [x] 4.3 Connect with an ephemeral token fetched from Iris Link instead of an API key — verify a full spoken session with no Gemini API key on the phone, and that an early 1011 close is reported as not authorized
 - [ ] 4.4 Implement the Live WebSocket client (setup, realtime input, server content, transcripts, tool calls, session resumption) — verify against the prototype's recorded message flow
 - [ ] 4.5 Implement capture and playback with `.playAndRecord`, echo cancellation, and barge-in flush — verify playback stops within a perceptibly immediate interval when the user speaks over it
@@ -35,12 +35,14 @@
 
 ## 5. iOS: agent work
 
-- [ ] 5.1 Implement the dispatch gate as a Swift value type mirroring `hermesGate.mjs` — verify unit tests reject same-turn dispatch, allow confirmed dispatch, and handle decline and amend
+- [x] 5.1 Implement the dispatch gate as a Swift value type mirroring `hermesGate.mjs` — verify unit tests reject same-turn dispatch, allow confirmed dispatch, and handle decline and amend
 - [ ] 5.2 Implement the Hermes client (dispatch, run status, stored results, interaction responses) against the pinned session — verify a task dispatched from the phone appears in the same session as desktop runs
 - [ ] 5.3 Wire the Live tool declarations to the gate and Hermes client — verify a full voice round trip: request, read-back, confirmation, dispatch, "it started"
 - [ ] 5.4 Implement run list and result reading, including runs dispatched elsewhere — verify a desktop-dispatched result can be opened and read on the phone
 - [ ] 5.5 Implement local completion notifications raised on reconnect — verify a run finishing with the app closed produces a notification that deep-links to the result
 - [ ] 5.6 Implement the secure input surface for credential requests from a run — verify a secret prompt never appears in the transcript or is spoken
+- [ ] 5.7 Reconcile `LINK_API.md` with the desktop where the phone implementer found them disagreeing: the barge-in rule (desktop accepts a read-back interrupted after 48 audible characters; the contract says any interruption invalidates it) and the missing `allowDuringReadback` equivalent — verify the contract, the desktop, and the Swift gate state one rule and share test cases for it
+- [ ] 5.8 Expose pending approvals to the phone (a field on task status or an undelivered-style list) so an approval can be surfaced rather than only answered — verify a run awaiting approval shows as such on the phone and that approving still requires a user turn
 
 ## 6. Siri entry points
 

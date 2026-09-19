@@ -23,6 +23,10 @@ function cleanEntry(raw) {
     urgency: String(raw.urgency || "normal"),
     transport: String(raw.transport || "runs_api"),
     liveSessionId: String(raw.liveSessionId || raw.live_session_id || ""),
+    // Who dispatched this run: "desktop", or "device:<deviceId>" for a run a
+    // paired phone sent through Iris Link. Completion delivery branches on it,
+    // so an old entry with no origin is treated as a desktop run.
+    origin: String(raw.origin || "desktop").slice(0, 128),
     output: String(raw.output || ""),
     error: String(raw.error || ""),
     createdAt: Number(raw.createdAt) || Date.now(),
@@ -149,6 +153,7 @@ export class RunRegistry {
     status = "started",
     transport = "runs_api",
     liveSessionId = "",
+    origin = "desktop",
   }) {
     const now = Date.now();
     const entry = cleanEntry({
@@ -159,6 +164,7 @@ export class RunRegistry {
       status,
       transport,
       liveSessionId,
+      origin,
       createdAt: now,
       updatedAt: now,
     });

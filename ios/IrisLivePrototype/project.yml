@@ -58,3 +58,33 @@ targets:
         # Leave DEVELOPMENT_TEAM empty: pick your team in Xcode > Signing.
         DEVELOPMENT_TEAM: YA3FM9C24T
         SWIFT_STRICT_CONCURRENCY: minimal
+
+  # The gate and the tool-result shapes are a contract with the desktop, so
+  # they are unit-tested rather than only exercised by hand on a phone.
+  IrisLivePrototypeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: IrisLivePrototype
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iris.liveprototype.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: YA3FM9C24T
+        SWIFT_STRICT_CONCURRENCY: minimal
+
+schemes:
+  IrisLivePrototype:
+    build:
+      targets:
+        IrisLivePrototype: all
+        IrisLivePrototypeTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - IrisLivePrototypeTests

@@ -8,6 +8,14 @@ Prototype for the iOS voice companion. Two things are proved here:
 2. The phone can pair with the Iris desktop over Tailscale and run those
    sessions on **short-lived tokens minted by the Mac**, with no Gemini API key
    on the phone at all.
+3. From that session the phone can send real work to Hermes on the Mac — behind
+   a two-step confirmation gate enforced in code, not in the prompt — track the
+   run, and announce the result when it lands.
+
+`LINK_API.md` in this folder is the contract the desktop wrote and this app
+implements: every route, every error code, every tool's exact result JSON, the
+gate's state machine, the system-event templates, and the announced/undelivered
+protocol.
 
 There is no Swift SDK for the Live API, so `LiveClient.swift` implements the
 `BidiGenerateContent` WebSocket protocol by hand.
@@ -24,9 +32,14 @@ a live session from this Swift client:
 | RPC | `…GenerativeService.BidiGenerateContent` | `…GenerativeService.BidiGenerateContentConstrained` |
 | Credential | `?key=<key>` | `?access_token=<token>` |
 
-("Constrained" is the token's `liveConnectConstraints`: the desktop fixes the
-model and `responseModalities: ["AUDIO"]` when it mints the token. A voice and
-transcription config in `setup` are still accepted on top of that.)
+("Constrained" is the token's `liveConnectConstraints`.) The desktop now bakes
+the whole session into the token — model, voice, transcription, system
+instruction **and the Hermes tool declarations** — and that config *replaces*
+whatever the client sends in `setup`. So in paired mode the phone sends nothing
+but the model name (`LiveClient.Config.minimalSetup`) and relies on none of it:
+it just answers the tool calls. The Voice field is therefore gone from the
+paired UI and kept only for the unpaired developer fallback, where the client's
+own `setup` is still what counts.
 
 Tokens are minted with `uses: 1` and a 60 s window in which to start a session,
 so the app fetches one immediately before each connect and never stores or
@@ -43,13 +56,23 @@ the UI reports as an authorization problem and never retries blindly.
 | `Sources/LiveClient.swift` | Foundation-only actor: connect, `setup`, `realtimeInput` audio, `clientContent` text, parse server frames, emit an `AsyncStream<LiveEvent>`. Compiles for iOS **and** macOS. |
 | `Sources/AudioEngine.swift` | `AVAudioSession` + `AVAudioEngine`: mic tap → `AVAudioConverter` → 40 ms 16 kHz Int16 chunks; `AVAudioPlayerNode` playback of 24 kHz PCM16; `flushPlayback()` for barge-in. Rebuilds the whole graph on route/configuration changes (Bluetooth) and publishes an `AudioStatus` snapshot. iOS only. |
 | `Sources/LinkClient.swift` | Foundation + CryptoKit: strict `iris-link://pair` deep-link parsing, the six-digit code derivation (same as `electron/pairingStore.mjs`), and the async client for `/link/pair`, `/link/status`, `/link/gemini-token`. Compiles for iOS **and** macOS. |
+| `Sources/LinkTasks.swift` | The task half of Iris Link (`LINK_API.md` §4): dispatch, list, status, result, stop, approval, announced — with every documented error code as a typed `LinkError`. Defines `LinkTaskService`, the seam the tool router is tested against. |
+| `Sources/DispatchGate.swift` | Pure-value port of `electron/hermesGate.mjs` (`LINK_API.md` §6): one proposal at a time, read-back → user turn → claim, the same rejection reasons, a 5-minute TTL. Plus `ApprovalGate`, the same ordering rule for `approve_hermes_action`. No I/O, no clock of its own. |
+| `Sources/ToolRouter.swift` | Executes the eight declared tools and returns *exactly* the JSON of `LINK_API.md` §5, `instructions` strings verbatim. Also `HermesBrief.format` (a port of the desktop's `formatHermesBrief`) and the `SYSTEM_EVENT_*` templates. |
+| `Sources/SessionCoordinator.swift` | Turns Live events into gate transitions, runs tool calls off the audio path, polls active runs on the contract's 2 s cadence with backoff, injects `SYSTEM_EVENT_SESSION_START` and `SYSTEM_EVENT_HERMES_COMPLETE`, and calls `announced` only after the announcement turn completes. Foundation-only. |
+| `Sources/RunsView.swift` | The run list (including desktop-dispatched runs), stop, and the raw stored result. Also the quiet background poll that watches for completions while no session is live. |
+| `Sources/RunNotifier.swift` | Local notifications for this phone's completed runs, with an honest note about what iOS delivers without push. |
 | `Sources/KeychainStore.swift` | The pairing (host, port, device id, credential) and the fallback API key, both `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, never logged. |
-| `Sources/ContentView.swift` | SwiftUI harness: paired card / pairing sheet, developer-fallback key field, Start/Stop, status dot, rolling transcript, error line, received-audio counter, and the route/engine debug lines. |
+| `Sources/ContentView.swift` | SwiftUI harness: paired card / pairing sheet, developer-fallback key field, Start/Stop, status dot, the pending-proposal indicator, the runs section, rolling transcript, error line, and a collapsed Debug group holding the route/engine lines and the tool log. |
 | `Sources/IrisLivePrototypeApp.swift` | `@main` app entry. |
 | `Tools/main.swift` | macOS CLI probe — reuses `LiveClient.swift`, reads the key from `~/.iris/.env`, sends one text turn, counts audio bytes. |
 | `Tools/run-probe.sh` | Builds and runs the probe. |
 | `Tools/LinkProbe/main.swift` | macOS CLI probe for the *pairing* path — reuses `LinkClient.swift` and `LiveClient.swift` to derive a code, pair, call status, mint a token through Link, open a Live session with it, and show what a reused token and a revoked credential look like. |
 | `Tools/run-link-probe.sh` | Builds that probe. |
+| `Tools/ConversationProbe/main.swift` | macOS CLI probe for the *dispatch* path — reuses `LiveClient`, `LinkClient`, `DispatchGate`, `ToolRouter` and `SessionCoordinator` to hold a real text conversation on a real ephemeral token and show the gate, the dispatch and the announcement. |
+| `Tools/run-conversation-probe.sh` | Builds that probe. |
+| `Tools/linkHarness.mjs` | Throwaway Node harness for the probe: the **real** `electron/irisLinkServer.mjs`, `electron/pairingStore.mjs` and `electron/mobileSession.mjs` on 127.0.0.1, with **fake** task handlers so nothing reaches Hermes. |
+| `Tests/` | XCTest target: the gate against every case in `test/hermesGate.test.mjs` plus the contract's extra orderings, and every tool result shape against `LINK_API.md`. |
 | `project.yml` | XcodeGen spec (bundle id `app.iris.liveprototype`, iOS 18, Swift 5 mode, the `iris-link` URL scheme). |
 
 ## Open and run on a phone
@@ -154,6 +177,79 @@ revoked credential coming back as `not_paired`.
 Subcommands: `code`, `parse-strict`, `pair`, `status`, `live`, `reuse`. Only the
 probe may parse a deep link whose host is outside 100.64.0.0/10, through an
 explicit argument the app never passes.
+
+## End-to-end dispatch probe (no phone needed)
+
+Runs a real Live session on a real ephemeral token against a real Iris Link
+server whose task handlers are fakes, so no Hermes work is dispatched.
+
+```bash
+./Tools/run-conversation-probe.sh                 # builds ./.build/conversationprobe
+
+# terminal 1 — the harness (GEMINI_API_KEY is read from ~/.iris/.env, never printed)
+SCRATCH=/tmp/iris-probe PORT=8799 COMPLETE_AFTER_MS=25000 node Tools/linkHarness.mjs
+
+# terminal 2
+./.build/conversationprobe pair "$(cat /tmp/iris-probe/deeplink.txt)" /tmp/iris-probe/cred.json
+./.build/conversationprobe confirm /tmp/iris-probe/cred.json   # propose → blocked submit → confirmed submit → status → completion
+./.build/conversationprobe decline /tmp/iris-probe/cred.json   # decline → discard, nothing dispatched
+```
+
+`confirm` costs one Live connect, `decline` one more. Watch the harness output:
+`DISPATCH_RECEIVED` must appear exactly once, carrying the exact staged brief,
+and only after the confirmation turn. `ANNOUNCED_ACK` must appear only after the
+announcement turn finished.
+
+## Unit tests
+
+```bash
+xcrun simctl list devices available | grep iPhone
+xcodebuild test -project IrisLivePrototype.xcodeproj -scheme IrisLivePrototype \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+```
+
+## Device test script: Hermes from your pocket
+
+The one that matters. Phone paired, Iris and Hermes running on the Mac,
+AirPods in (or the phone on a desk on speaker).
+
+1. **Start** the session. Iris greets you once.
+2. Ask for something small and real, naming Hermes:
+   *"Ask Hermes to count the files in my Downloads folder and tell me which one
+   is the largest."*
+3. **Hear the read-back.** Iris repeats the brief in a sentence or two and asks
+   whether to send it. The orange **"Waiting for your answer — nothing sent
+   yet"** card appears with the exact brief. Nothing has left the phone.
+4. **Confirm by voice** — "yes", "go ahead", "send it", whatever is natural.
+   The gate does not match words; Iris interprets you.
+5. **Look at the Mac.** A task card appears there within a second or two.
+6. Keep talking while it runs. Ask *"how's that going?"* — Iris must say it is
+   still working and nothing more.
+7. **Hear the result announced** on the phone when Hermes finishes, without
+   asking for it.
+8. **Open the run** in the Hermes runs list and read the full stored output.
+
+### The negative test — run this every time
+
+1. Ask for something you do *not* want done:
+   *"Ask Hermes to delete everything in my Downloads folder."*
+2. Wait for the read-back.
+3. **Say no** — "no", "forget it", "don't send that".
+4. **Nothing must be dispatched.** No task card on the Mac, no new row in the
+   runs list, and the pending-proposal card disappears.
+
+Also worth doing once: interrupt Iris *during* the read-back and then say
+"yes". The submit must be refused and Iris must stage and read the brief again
+— a brief you talked over was not a brief you heard.
+
+### What the phone cannot do, and says so
+
+- A Hermes clarification, a sudo password or any secret: Iris says it needs
+  attention on the Mac. There is no transport for those (`LINK_API.md` §4).
+- A dangerous-command approval *can* be resolved from the phone, but only after
+  Iris describes it, ends its turn, and you answer in a turn of your own.
+- If the Mac is unreachable the app says so; if the Mac is up but Hermes is
+  not, it says *that* instead. They are different sentences on purpose.
 
 ## Device test script: pairing
 

@@ -40,6 +40,13 @@ public enum LiveEvent: Sendable {
     case interrupted
     /// Model finished generating for this turn.
     case generationComplete
+    /// The model wants one or more declared functions executed. Field names
+    /// per https://ai.google.dev/api/live: `toolCall.functionCalls[]`, each
+    /// with `id`, `name`, `args`.
+    case toolCall([LiveToolCall])
+    /// `toolCallCancellation.ids[]` — the model abandoned these calls. Their
+    /// results must not be sent, and a cancelled side effect must not happen.
+    case toolCallCancellation([String])
     /// Turn boundary.
     case turnComplete
     /// Server intends to close the connection soon.
@@ -58,9 +65,87 @@ public enum LiveEvent: Sendable {
     case closed(code: Int, reason: String?)
 }
 
+// MARK: - Tool calls
+
+/// One entry of `toolCall.functionCalls[]`.
+///
+/// `args` is decoded JSON, so it is `[String: Any]`; the struct is
+/// `@unchecked Sendable` because that dictionary is created once at parse time
+/// and never mutated afterwards.
+public struct LiveToolCall: @unchecked Sendable {
+    /// The call id the matching function response must echo back.
+    public let id: String
+    public let name: String
+    public let args: [String: Any]
+
+    public init(id: String, name: String, args: [String: Any]) {
+        self.id = id
+        self.name = name
+        self.args = args
+    }
+
+    public init?(json: [String: Any]) {
+        guard let name = json["name"] as? String, !name.isEmpty else { return nil }
+        self.id = (json["id"] as? String) ?? ""
+        self.name = name
+        self.args = (json["args"] as? [String: Any]) ?? [:]
+    }
+
+    /// Models sometimes send a number or a bool where a string is declared;
+    /// coerce rather than silently dropping the user's detail.
+    public func string(_ key: String) -> String {
+        switch args[key] {
+        case let value as String: return value
+        case let value as NSNumber: return value.stringValue
+        case .none: return ""
+        case .some(let value): return String(describing: value)
+        }
+    }
+
+    public func stringArray(_ key: String) -> [String] {
+        if let values = args[key] as? [Any] {
+            return values.compactMap { item in
+                if let text = item as? String { return text }
+                if let number = item as? NSNumber { return number.stringValue }
+                return nil
+            }
+        }
+        if let single = args[key] as? String { return [single] }
+        return []
+    }
+}
+
+/// One entry of `toolResponse.functionResponses[]`.
+public struct LiveFunctionResponse: @unchecked Sendable {
+    public let id: String
+    public let name: String
+    public let response: [String: Any]
+
+    public init(id: String, name: String, response: [String: Any]) {
+        self.id = id
+        self.name = name
+        self.response = response
+    }
+
+    var wireFormat: [String: Any] {
+        var entry: [String: Any] = ["name": name, "response": response]
+        // The id is optional on the wire but required for correlation when the
+        // model issues several calls in one turn.
+        if !id.isEmpty { entry["id"] = id }
+        return entry
+    }
+}
+
+/// What the session coordinator needs from a live socket. A protocol so the
+/// coordinator can be driven by something other than a real connection.
+public protocol LiveTransport: Sendable {
+    func sendToolResponses(_ responses: [LiveFunctionResponse]) async
+    func sendTextTurn(_ text: String, turnComplete: Bool) async
+}
+
 // MARK: - Client
 
-public actor LiveClient {
+public actor LiveClient: LiveTransport {
 
     /// How this session authenticates. The two modes reach *different*
     /// endpoints — see `endpoint(for:)`.
@@ -85,19 +170,28 @@ public actor LiveClient {
         public var voiceName: String
         public var systemInstruction: String?
         public var enableTranscription: Bool
+        /// Paired mode. An ephemeral token carries
+        /// `liveConnectConstraints.config`, which REPLACES the client's setup
+        /// frame: voice, transcription, system instruction and tool
+        /// declarations all come from the Mac. So the phone sends the bare
+        /// minimum needed to open the session and relies on none of it
+        /// (LINK_API.md §3).
+        public var minimalSetup: Bool
 
         public init(
             credential: Credential,
             model: String = "models/gemini-3.1-flash-live-preview",
             voiceName: String = "Iapetus",
             systemInstruction: String? = nil,
-            enableTranscription: Bool = true
+            enableTranscription: Bool = true,
+            minimalSetup: Bool = false
         ) {
             self.credential = credential
             self.model = model
             self.voiceName = voiceName
             self.systemInstruction = systemInstruction
             self.enableTranscription = enableTranscription
+            self.minimalSetup = minimalSetup
         }
 
         public init(
@@ -112,7 +206,8 @@ public actor LiveClient {
                 model: model,
                 voiceName: voiceName,
                 systemInstruction: systemInstruction,
-                enableTranscription: enableTranscription
+                enableTranscription: enableTranscription,
+                minimalSetup: false
             )
         }
     }
@@ -225,6 +320,13 @@ public actor LiveClient {
     // MARK: Outbound frames
 
     private func sendSetup() async {
+        if config.minimalSetup {
+            // Everything else is supplied by the token and silently ignored
+            // here; sending it anyway would only invite the illusion that the
+            // phone controls it.
+            await sendJSON(["setup": ["model": config.model]])
+            return
+        }
         var generationConfig: [String: Any] = [
             "responseModalities": ["AUDIO"],
             "speechConfig": [
@@ -281,6 +383,14 @@ public actor LiveClient {
                 "turnComplete": turnComplete
             ]
         ])
+    }
+
+    /// Answers one or more tool calls. Wire shape per
+    /// https://ai.google.dev/api/live —
+    /// `{"toolResponse": {"functionResponses": [{"id", "name", "response"}]}}`.
+    public func sendToolResponses(_ responses: [LiveFunctionResponse]) async {
+        guard !responses.isEmpty else { return }
+        await sendJSON(["toolResponse": ["functionResponses": responses.map(\.wireFormat)]])
     }
 
     private func sendJSON(_ object: [String: Any]) async {
@@ -377,6 +487,18 @@ public actor LiveClient {
                 handle: resumption["newHandle"] as? String,
                 resumable: (resumption["resumable"] as? Bool) ?? false
             ))
+        }
+
+        // Tool traffic is a sibling of serverContent, not a child of it.
+        if let cancellation = root["toolCallCancellation"] as? [String: Any] {
+            let ids = (cancellation["ids"] as? [Any])?.compactMap { $0 as? String } ?? []
+            if !ids.isEmpty { emit(.toolCallCancellation(ids)) }
+        }
+
+        if let toolCall = root["toolCall"] as? [String: Any] {
+            let raw = (toolCall["functionCalls"] as? [[String: Any]]) ?? []
+            let calls = raw.compactMap(LiveToolCall.init(json:))
+            if !calls.isEmpty { emit(.toolCall(calls)) }
         }
 
         guard let content = root["serverContent"] as? [String: Any] else { return }

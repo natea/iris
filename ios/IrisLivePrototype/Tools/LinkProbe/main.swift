@@ -71,6 +71,14 @@ func describe(_ error: Error) -> String {
         case .tokenUnavailable: return "tokenUnavailable"
         case .server(let status, let code): return "server(\(status),\(code))"
         case .badResponse(let detail): return "badResponse(\(detail))"
+        case .tasksUnavailable: return "tasksUnavailable"
+        case .taskUnknown: return "taskUnknown"
+        case .taskNotFinished: return "taskNotFinished"
+        case .resultUnavailable: return "resultUnavailable"
+        case .approvalNotPending: return "approvalNotPending"
+        case .agentUnreachable(let detail): return "agentUnreachable(\(detail))"
+        case .dispatchFailed(let detail): return "dispatchFailed(\(detail))"
+        case .invalidRequest(let code): return "invalidRequest(\(code))"
         }
     }
     return "other(\(error))"
@@ -135,6 +143,10 @@ func runLive(credential: LiveClient.Credential, model: String, prompt: String, t
         case .closed(let code, let reason):
             outcome.closeCode = code
             outcome.closeReason = reason
+        case .toolCall, .toolCallCancellation:
+            // This probe checks pairing and token authorization only; the
+            // dispatch path has its own probe in Tools/ConversationProbe.
+            break
         }
     }
     deadline.cancel()

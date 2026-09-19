@@ -235,6 +235,25 @@ public enum LinkError: Error, Equatable {
     /// The desktop is reachable but could not mint a Gemini token (502).
     case tokenUnavailable
 
+    // ----- The task API's named failures (LINK_API.md §4) -----
+
+    /// 501. This desktop build never wired the task API.
+    case tasksUnavailable
+    /// 404 `task_unknown` — the desktop has never seen this run id.
+    case taskUnknown
+    /// 409 `task_not_finished` — asked for a result before a terminal status.
+    case taskNotFinished
+    /// 404 `result_unavailable` — terminal, but the stored result is gone.
+    case resultUnavailable
+    /// 409 `approval_not_pending` — the desktop or a timeout already resolved it.
+    case approvalNotPending
+    /// 502 `agent_unreachable` — the Mac is up, Hermes is not.
+    case agentUnreachable(String)
+    /// 502 `dispatch_failed` — Hermes refused or returned no run id.
+    case dispatchFailed(String)
+    /// 400 `task_required` / `task_too_long` / `invalid_urgency` / `invalid_decision`.
+    case invalidRequest(String)
+
     /// Anything else the service said, kept explicit rather than swallowed.
     case server(status: Int, code: String)
 
@@ -265,6 +284,23 @@ public enum LinkError: Error, Equatable {
             }
         case .tokenUnavailable:
             return "Your Mac could not issue a Gemini session token. Check that a Gemini API key is configured in Iris on the desktop."
+        case .tasksUnavailable:
+            return "This version of Iris on your Mac cannot take tasks from the phone. Update Iris on the desktop."
+        case .taskUnknown:
+            return "Iris on your Mac does not know that run."
+        case .taskNotFinished:
+            return "That Hermes run has not finished yet."
+        case .resultUnavailable:
+            return "That Hermes result could not be restored on your Mac."
+        case .approvalNotPending:
+            return "Hermes has no pending approval for that run — it was already answered on the Mac, or it timed out."
+        case .agentUnreachable(let detail):
+            return "Your Mac is reachable but Hermes is not responding on it."
+                + (detail.isEmpty ? "" : " (\(detail))")
+        case .dispatchFailed(let detail):
+            return "Hermes refused the task." + (detail.isEmpty ? "" : " (\(detail))")
+        case .invalidRequest(let code):
+            return "Iris on your Mac refused the request (\(code))."
         case .server(let status, let code):
             return "Iris on your Mac returned an error (\(status) \(code))."
         case .badResponse(let detail):
@@ -374,7 +410,13 @@ public struct LinkClient: Sendable {
 
     // MARK: Transport
 
-    private func send(
+    /// Authenticated JSON call. The task API in LinkTasks.swift goes through
+    /// this and nothing else.
+    func request(path: String, method: String, body: [String: Any]?) async throws -> [String: Any] {
+        try await send(path: path, method: method, body: body, authenticated: true)
+    }
+
+    func send(
         path: String,
         method: String,
         body: [String: Any]?,
@@ -417,11 +459,27 @@ public struct LinkClient: Sendable {
         if http.statusCode == 401 { throw LinkError.notPaired }
 
         guard (200..<300).contains(http.statusCode) else {
-            if path == "/link/pair" {
+            if path.hasPrefix("/link/pair") {
                 throw LinkError.pairingRefused(code.isEmpty ? "http_\(http.statusCode)" : code)
             }
-            if code == "token_unavailable" { throw LinkError.tokenUnavailable }
-            throw LinkError.server(status: http.statusCode, code: code.isEmpty ? "unknown" : code)
+            // `message` is the only free text the service returns, and the
+            // contract promises it never carries a credential or a key.
+            let detail = (json["message"] as? String) ?? ""
+            switch code {
+            case "token_unavailable": throw LinkError.tokenUnavailable
+            case "tasks_unavailable": throw LinkError.tasksUnavailable
+            case "task_unknown": throw LinkError.taskUnknown
+            case "task_not_finished": throw LinkError.taskNotFinished
+            case "result_unavailable": throw LinkError.resultUnavailable
+            case "approval_not_pending": throw LinkError.approvalNotPending
+            case "agent_unreachable": throw LinkError.agentUnreachable(detail)
+            case "dispatch_failed": throw LinkError.dispatchFailed(detail)
+            case "task_required", "task_too_long", "invalid_urgency", "invalid_decision",
+                 "invalid_json", "payload_too_large", "unsupported_media_type":
+                throw LinkError.invalidRequest(code)
+            default:
+                throw LinkError.server(status: http.statusCode, code: code.isEmpty ? "unknown" : code)
+            }
         }
         if json.isEmpty { throw LinkError.badResponse("empty body") }
         return json

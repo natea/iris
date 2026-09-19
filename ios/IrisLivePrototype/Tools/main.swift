@@ -91,6 +91,10 @@ for await event in stream {
         await client.close()
     case .goAway(let timeLeft):
         print("goAway \(timeLeft ?? "")")
+    case .toolCall, .toolCallCancellation:
+        // The raw protocol probe declares no tools; nothing to answer.
+        break
+
     case .sessionResumption:
         break
     case .authorizationFailed(let code, let reason):

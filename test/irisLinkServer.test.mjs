@@ -58,6 +58,8 @@ async function startLink(options = {}) {
         newSessionExpiresAt: "2026-01-01T00:01:00.000Z",
         model: "models/gemini-3.1-flash-live-preview",
       })),
+    tasks: options.tasks,
+    checkHermesReachable: options.checkHermesReachable,
     hermes: {
       baseUrl: options.hermesBaseUrl || "http://127.0.0.1:1",
       getApiKey: () => SHARED_KEY,
@@ -480,4 +482,401 @@ test("credentials are compared without regard to a shared prefix", async (t) => 
     assert.equal(response.status, 401);
     await response.arrayBuffer();
   }
+});
+
+// ===== High-level task API =====
+//
+// The handlers are injected, so these exercise the server's own contract:
+// auth, validation, and the error code each failure maps to. The real
+// handlers in main.mjs go through the desktop's own dispatch path.
+
+// A fake desktop: a run registry with just enough behavior to observe origin,
+// terminal status, and the announced handshake.
+function fakeDesktop({ runs = [] } = {}) {
+  const registry = new Map(runs.map((run) => [run.run_id, { ...run }]));
+  const dispatched = [];
+  return {
+    registry,
+    dispatched,
+    tasks: {
+      dispatch: async ({ task, urgency, deviceId }) => {
+        if (task === "unreachable") throw new Error("connect ECONNREFUSED");
+        if (task === "refused") return { error: "dispatch_failed", message: "Task is required." };
+        const run = {
+          run_id: `run-${dispatched.length + 1}`,
+          task,
+          status: "started",
+          origin: `device:${deviceId}`,
+          created_at: 1,
+          updated_at: 1,
+          announced_at: 0,
+        };
+        dispatched.push({ task, urgency, deviceId });
+        registry.set(run.run_id, run);
+        return { status: "started", run_id: run.run_id, message: "Hermes has started the task.", origin: run.origin };
+      },
+      list: ({ deviceId, undelivered }) =>
+        [...registry.values()].filter((run) =>
+          !undelivered ||
+          (["completed", "failed"].includes(run.status) &&
+            run.origin === `device:${deviceId}` &&
+            !run.announced_at),
+        ),
+      get: async ({ runId }) => {
+        const run = registry.get(runId);
+        if (!run) return { error: "task_unknown" };
+        return { ...run, instructions: "Hermes is still working." };
+      },
+      result: async ({ runId }) => {
+        const run = registry.get(runId);
+        if (!run) return { ok: false, error: "task_unknown" };
+        if (!["completed", "failed"].includes(run.status)) {
+          return { ok: false, error: "task_not_finished" };
+        }
+        return { ok: true, run_id: runId, task: run.task, status: run.status, output: run.output || "" };
+      },
+      stop: async ({ runId }) => {
+        const run = registry.get(runId);
+        if (!run) return { ok: false, error: "task_unknown" };
+        run.status = "cancelled";
+        return { status: "stopping" };
+      },
+      approve: async ({ runId, decision }) => {
+        const run = registry.get(runId);
+        if (!run) return { ok: false, error: "task_unknown" };
+        if (!run.awaitingApproval) return { ok: false, error: "approval_not_pending" };
+        run.decision = decision;
+        return { ok: true };
+      },
+      markAnnounced: ({ runId }) => {
+        const run = registry.get(runId);
+        if (!run) return { ok: false, error: "task_unknown" };
+        run.announced_at = 42;
+        return { ok: true };
+      },
+    },
+  };
+}
+
+async function linkFetch(link, credential, path, init = {}) {
+  const response = await fetch(`${link.origin}${path}`, {
+    ...init,
+    headers: {
+      ...(credential ? { Authorization: `Bearer ${credential}` } : {}),
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers || {}),
+    },
+  });
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : null };
+}
+
+test("every task route refuses an unpaired caller with not_paired", async (t) => {
+  const desktop = fakeDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+
+  const calls = [
+    ["POST", "/link/tasks", JSON.stringify({ task: "do a thing" })],
+    ["GET", "/link/tasks", null],
+    ["GET", "/link/tasks/run-1", null],
+    ["GET", "/link/tasks/run-1/result", null],
+    ["POST", "/link/tasks/run-1/stop", null],
+    ["POST", "/link/tasks/run-1/approval", JSON.stringify({ decision: "once" })],
+    ["POST", "/link/tasks/run-1/announced", null],
+  ];
+  for (const [method, path, body] of calls) {
+    const result = await linkFetch(link, "", path, { method, body });
+    assert.equal(result.status, 401, `${method} ${path}`);
+    assert.deepEqual(result.body, { error: "not_paired" });
+  }
+  assert.equal(desktop.dispatched.length, 0);
+});
+
+test("a dispatched task records the device origin and returns a run id", async (t) => {
+  const desktop = fakeDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const created = await linkFetch(link, paired.credential, "/link/tasks", {
+    method: "POST",
+    body: JSON.stringify({ task: "Summarize the repo", urgency: "high" }),
+  });
+  assert.equal(created.status, 200);
+  assert.equal(created.body.status, "started");
+  assert.equal(created.body.run_id, "run-1");
+  assert.equal(created.body.origin, `device:${paired.deviceId}`);
+  assert.deepEqual(desktop.dispatched, [
+    { task: "Summarize the repo", urgency: "high", deviceId: paired.deviceId },
+  ]);
+});
+
+test("dispatch validation is explicit and nothing reaches the agent", async (t) => {
+  const desktop = fakeDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const post = (body) =>
+    linkFetch(link, paired.credential, "/link/tasks", { method: "POST", body });
+
+  assert.deepEqual(await post(JSON.stringify({})), { status: 400, body: { error: "task_required" } });
+  assert.deepEqual(await post(JSON.stringify({ task: "   " })), {
+    status: 400,
+    body: { error: "task_required" },
+  });
+  assert.deepEqual(await post(JSON.stringify({ task: "x", urgency: "URGENT" })), {
+    status: 400,
+    body: { error: "invalid_urgency" },
+  });
+  assert.deepEqual(await post("not json"), { status: 400, body: { error: "invalid_json" } });
+  assert.deepEqual(await post(JSON.stringify({ task: "x".repeat(20_001) })), {
+    status: 400,
+    body: { error: "task_too_long" },
+  });
+  assert.equal(desktop.dispatched.length, 0);
+
+  const unreachable = await post(JSON.stringify({ task: "unreachable" }));
+  assert.equal(unreachable.status, 502);
+  assert.equal(unreachable.body.error, "agent_unreachable");
+  const refused = await post(JSON.stringify({ task: "refused" }));
+  assert.equal(refused.status, 502);
+  assert.equal(refused.body.error, "dispatch_failed");
+});
+
+test("the task list includes desktop-dispatched runs", async (t) => {
+  const desktop = fakeDesktop({
+    runs: [
+      {
+        run_id: "desk-1",
+        task: "Desktop work",
+        status: "completed",
+        origin: "desktop",
+        created_at: 10,
+        updated_at: 20,
+        announced_at: 5,
+      },
+    ],
+  });
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  await linkFetch(link, paired.credential, "/link/tasks", {
+    method: "POST",
+    body: JSON.stringify({ task: "Phone work" }),
+  });
+  const listed = await linkFetch(link, paired.credential, "/link/tasks");
+  assert.equal(listed.status, 200);
+  const byId = Object.fromEntries(listed.body.tasks.map((entry) => [entry.run_id, entry]));
+  assert.equal(byId["desk-1"].origin, "desktop");
+  assert.equal(byId["desk-1"].task, "Desktop work");
+  assert.equal(byId["run-1"].origin, `device:${paired.deviceId}`);
+  for (const key of ["run_id", "task", "status", "origin", "created_at", "updated_at"]) {
+    assert.ok(key in byId["desk-1"], `list entries carry ${key}`);
+  }
+});
+
+test("status and result are honest about unknown and unfinished runs", async (t) => {
+  const desktop = fakeDesktop({
+    runs: [
+      { run_id: "run-live", task: "Working", status: "running", origin: "desktop", created_at: 1, updated_at: 2 },
+      {
+        run_id: "run-done",
+        task: "Done",
+        status: "completed",
+        origin: "desktop",
+        created_at: 1,
+        updated_at: 3,
+        output: "Three folders: a, b, c.",
+      },
+    ],
+  });
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const get = (path) => linkFetch(link, paired.credential, path);
+
+  assert.deepEqual(await get("/link/tasks/nope"), { status: 404, body: { error: "task_unknown" } });
+  assert.deepEqual(await get("/link/tasks/nope/result"), {
+    status: 404,
+    body: { error: "task_unknown" },
+  });
+
+  const live = await get("/link/tasks/run-live");
+  assert.equal(live.status, 200);
+  assert.equal(live.body.status, "running");
+  assert.equal(live.body.run_id, "run-live");
+
+  const early = await get("/link/tasks/run-live/result");
+  assert.equal(early.status, 409);
+  assert.deepEqual(early.body, { error: "task_not_finished" });
+
+  const finished = await get("/link/tasks/run-done/result");
+  assert.equal(finished.status, 200);
+  assert.equal(finished.body.output, "Three folders: a, b, c.");
+});
+
+test("stop and approval refuse unknown runs and validate the decision", async (t) => {
+  const desktop = fakeDesktop({
+    runs: [
+      { run_id: "run-1", task: "Working", status: "running", origin: "desktop", created_at: 1, updated_at: 2 },
+      {
+        run_id: "run-2",
+        task: "Paused",
+        status: "running",
+        origin: "desktop",
+        created_at: 1,
+        updated_at: 2,
+        awaitingApproval: true,
+      },
+    ],
+  });
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const post = (path, body) =>
+    linkFetch(link, paired.credential, path, { method: "POST", body });
+
+  assert.deepEqual(await post("/link/tasks/nope/stop"), {
+    status: 404,
+    body: { error: "task_unknown" },
+  });
+  const stopped = await post("/link/tasks/run-1/stop");
+  assert.equal(stopped.status, 200);
+  assert.equal(desktop.registry.get("run-1").status, "cancelled");
+
+  assert.deepEqual(await post("/link/tasks/run-2/approval", JSON.stringify({ decision: "maybe" })), {
+    status: 400,
+    body: { error: "invalid_decision" },
+  });
+  const notPending = await post("/link/tasks/run-1/approval", JSON.stringify({ decision: "once" }));
+  assert.equal(notPending.status, 409);
+  assert.equal(notPending.body.error, "approval_not_pending");
+
+  const approved = await post("/link/tasks/run-2/approval", JSON.stringify({ decision: "session" }));
+  assert.equal(approved.status, 200);
+  assert.equal(desktop.registry.get("run-2").decision, "session");
+});
+
+test("the undelivered/announced handshake never loses or repeats a completion", async (t) => {
+  const desktop = fakeDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const created = await linkFetch(link, paired.credential, "/link/tasks", {
+    method: "POST",
+    body: JSON.stringify({ task: "Phone work" }),
+  });
+  const runId = created.body.run_id;
+  desktop.registry.get(runId).status = "completed";
+
+  const pendingBefore = await linkFetch(link, paired.credential, "/link/tasks?undelivered=1");
+  assert.deepEqual(pendingBefore.body.tasks.map((entry) => entry.run_id), [runId]);
+
+  // Still undelivered until the phone acknowledges it: a reconnect mid-
+  // announcement must find it again.
+  const stillPending = await linkFetch(link, paired.credential, "/link/tasks?undelivered=1");
+  assert.deepEqual(stillPending.body.tasks.map((entry) => entry.run_id), [runId]);
+
+  const acked = await linkFetch(link, paired.credential, `/link/tasks/${runId}/announced`, {
+    method: "POST",
+  });
+  assert.deepEqual(acked, { status: 200, body: { ok: true, run_id: runId } });
+
+  const after = await linkFetch(link, paired.credential, "/link/tasks?undelivered=1");
+  assert.deepEqual(after.body.tasks, []);
+  assert.deepEqual(await linkFetch(link, paired.credential, "/link/tasks/nope/announced", { method: "POST" }), {
+    status: 404,
+    body: { error: "task_unknown" },
+  });
+});
+
+test("task routes refuse the wrong method and unknown actions", async (t) => {
+  const desktop = fakeDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const deleteList = await linkFetch(link, paired.credential, "/link/tasks", { method: "DELETE" });
+  assert.equal(deleteList.status, 405);
+  const postOne = await linkFetch(link, paired.credential, "/link/tasks/run-1", { method: "POST" });
+  assert.equal(postOne.status, 405);
+  const bogus = await linkFetch(link, paired.credential, "/link/tasks/run-1/launch", { method: "POST" });
+  assert.equal(bogus.status, 404);
+  const deep = await linkFetch(link, paired.credential, "/link/tasks/run-1/result/extra");
+  assert.equal(deep.status, 404);
+});
+
+test("without injected handlers the task API says so rather than pretending", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const listed = await linkFetch(link, paired.credential, "/link/tasks");
+  assert.deepEqual(listed, { status: 501, body: { error: "tasks_unavailable" } });
+});
+
+test("/link/status reports Hermes reachability freshly, then briefly caches it", async (t) => {
+  let reachable = false;
+  let probes = 0;
+  const link = await startLink({
+    getInfo: () => ({ hermesReachable: true, userName: "Nate", liveModel: "m", voice: "Zephyr", accent: "" }),
+    checkHermesReachable: async () => {
+      probes += 1;
+      return reachable;
+    },
+  });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  // The cached getInfo() flag said "reachable"; the live probe is what counts.
+  const first = await linkFetch(link, paired.credential, "/link/status");
+  assert.equal(first.body.hermesReachable, false);
+  assert.equal(probes, 1);
+
+  reachable = true;
+  const second = await linkFetch(link, paired.credential, "/link/status");
+  assert.equal(second.body.hermesReachable, false, "answers from the short cache");
+  assert.equal(probes, 1);
+});
+
+test("/link/status falls back to the reported flag when no probe is injected", async (t) => {
+  const link = await startLink({
+    getInfo: () => ({ hermesReachable: true, userName: "Nate", liveModel: "m", voice: "Zephyr", accent: "" }),
+  });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const status = await linkFetch(link, paired.credential, "/link/status");
+  assert.equal(status.body.hermesReachable, true);
+});
+
+test("a hung Hermes probe cannot hang a status request", async (t) => {
+  const link = await startLink({
+    getInfo: () => ({ hermesReachable: false, userName: "Nate", liveModel: "m", voice: "Zephyr", accent: "" }),
+    checkHermesReachable: () => new Promise(() => {}),
+  });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const started = Date.now();
+  const status = await linkFetch(link, paired.credential, "/link/status");
+  assert.equal(status.status, 200);
+  assert.equal(status.body.hermesReachable, false);
+  assert.ok(Date.now() - started < 5_000, "the probe is time-bounded");
+});
+
+test("an authenticated device reports a fresh last-seen immediately", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const pairedAt = link.store.listDevices()[0].lastSeenAt;
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await linkFetch(link, paired.credential, "/link/status");
+
+  const [device] = link.store.listDevices();
+  assert.ok(
+    device.lastSeenAt > pairedAt,
+    "the Settings list must not say 'never' for a device that just called",
+  );
 });

@@ -178,6 +178,15 @@ final class LiveSessionController: ObservableObject {
     /// Route + engine diagnostics, polled off the audio engine.
     @Published var audioStatus = AudioStatus()
 
+    /// The staged brief while the dispatch gate waits for the user's answer.
+    @Published var pendingProposal: String?
+    /// Runs in the pinned Hermes session, desktop-dispatched ones included.
+    @Published var runs: [LinkTask] = []
+    /// Tool / system-event lines, newest last. Collapsible in the UI.
+    @Published var toolLog: [String] = []
+    /// The run whose completion is currently being spoken.
+    @Published var announcingRunId: String?
+
     /// Raised when the Link service refuses this phone, so the view can drop
     /// back to the pairing flow.
     var onLinkError: ((LinkError) -> Void)?
@@ -187,15 +196,23 @@ final class LiveSessionController: ObservableObject {
     private var statusPoll: Task<Void, Never>?
     private var starter: Task<Void, Never>?
     private let audio = AudioEngine()
+    /// Present only in paired mode: the gate, the tool router, run polling
+    /// and the contract's system events all live in here.
+    private var coordinator: SessionCoordinator?
+    private var pairedDesktop: PairedDesktop?
+    /// Raised when a run this phone dispatched finishes, so the app can stop
+    /// double-notifying about something Iris just said out loud.
+    var onRunAnnounced: ((String) -> Void)?
 
     // MARK: Start
 
     /// The paired path: fetch a single-use token from the Mac, then connect
     /// with it. The token is never stored and never reused — it is minted with
     /// `uses: 1` and a 60 s window to start a session.
-    func startWithLink(paired: PairedDesktop, voice: String, model: String) {
+    func startWithLink(paired: PairedDesktop, model: String) {
         guard !isRunning else { return }
         reset()
+        pairedDesktop = paired
         status = .authorizing
         isRunning = true
         starter = Task { [weak self] in
@@ -206,7 +223,7 @@ final class LiveSessionController: ObservableObject {
                 self.begin(
                     credential: .ephemeralToken(minted.token),
                     model: minted.model.isEmpty ? model : minted.model,
-                    voice: voice
+                    voice: ""
                 )
             } catch let error as LinkError {
                 self.isRunning = false
@@ -230,6 +247,7 @@ final class LiveSessionController: ObservableObject {
             return
         }
         reset()
+        pairedDesktop = nil
         isRunning = true
         begin(credential: .apiKey(key), model: nil, voice: voice)
     }
@@ -240,6 +258,9 @@ final class LiveSessionController: ObservableObject {
         audioChunksReceived = 0
         audioBytesReceived = 0
         audioStatus = AudioStatus()
+        pendingProposal = nil
+        toolLog = []
+        announcingRunId = nil
     }
 
     private func begin(credential: LiveClient.Credential, model: String?, voice: String) {
@@ -247,19 +268,45 @@ final class LiveSessionController: ObservableObject {
         startStatusPolling()
 
         let config: LiveClient.Config
-        let instruction = "You are a terse voice assistant. Answer in one or two short sentences unless asked for more."
-        if let model, !model.isEmpty {
+        if let paired = pairedDesktop {
+            // Everything that decides who Iris is — voice, prompt, tools —
+            // is baked into the token by the Mac. The phone only opens the
+            // socket and answers the tool calls.
             config = .init(
                 credential: credential,
-                model: model,
-                voiceName: voice,
-                systemInstruction: instruction
+                model: model?.isEmpty == false ? model! : "models/gemini-3.1-flash-live-preview",
+                minimalSetup: true
             )
+            _ = paired
         } else {
-            config = .init(credential: credential, voiceName: voice, systemInstruction: instruction)
+            let instruction = "You are a terse voice assistant. Answer in one or two short sentences unless asked for more."
+            if let model, !model.isEmpty {
+                config = .init(
+                    credential: credential,
+                    model: model,
+                    voiceName: voice,
+                    systemInstruction: instruction
+                )
+            } else {
+                config = .init(credential: credential, voiceName: voice, systemInstruction: instruction)
+            }
         }
         let client = LiveClient(config: config)
         self.client = client
+
+        if let paired = pairedDesktop {
+            let sink: @Sendable (CoordinatorEvent) -> Void = { [weak self] event in
+                Task { @MainActor in self?.apply(coordinatorEvent: event) }
+            }
+            coordinator = SessionCoordinator(
+                link: LinkClient(paired: paired),
+                transport: client,
+                userName: "the user",
+                notify: sink
+            )
+        } else {
+            coordinator = nil
+        }
 
         pump = Task { [weak self] in
             guard let self else { return }
@@ -281,6 +328,9 @@ final class LiveSessionController: ObservableObject {
         statusPoll = nil
         audio.stop()
         audioStatus = audio.currentStatus()
+        let coordinator = self.coordinator
+        self.coordinator = nil
+        Task { await coordinator?.close() }
         let client = self.client
         self.client = nil
         pump?.cancel()
@@ -290,6 +340,10 @@ final class LiveSessionController: ObservableObject {
     }
 
     private func apply(_ event: LiveEvent) async {
+        // Ordered hand-off; returns as soon as the event is queued, so a slow
+        // tool call or a run poll can never stall audio.
+        if let coordinator { await coordinator.submit(event) }
+
         switch event {
         case .opened:
             status = .connecting
@@ -328,6 +382,13 @@ final class LiveSessionController: ObservableObject {
         case .sessionResumption:
             break
 
+        case .toolCall(let calls):
+            // Execution belongs to the coordinator; the UI only shows it.
+            for call in calls { toolLog.append("↳ \(call.name)") }
+
+        case .toolCallCancellation(let ids):
+            toolLog.append("↳ cancelled \(ids.count) tool call(s)")
+
         case .authorizationFailed(let code, let reason):
             // Not a network error and not something to retry: the token was
             // refused. Say so, and stop.
@@ -347,6 +408,47 @@ final class LiveSessionController: ObservableObject {
             if errorText.isEmpty {
                 errorText = "Closed (code \(code))" + (reason.map { ": \($0)" } ?? "")
             }
+        }
+    }
+
+    /// Everything the coordinator learns is surfaced here and nowhere else.
+    private func apply(coordinatorEvent event: CoordinatorEvent) {
+        switch event {
+        case .log(let line):
+            toolLog.append(line)
+            if toolLog.count > 200 { toolLog.removeFirst(toolLog.count - 200) }
+        case .pendingProposal(let brief):
+            pendingProposal = brief
+        case .runs(let list):
+            runs = list
+        case .toolCompleted(let name, _):
+            toolLog.append("↳ \(name) answered")
+        case .announcing(let runId, let status):
+            announcingRunId = runId
+            lines.append(.init(speaker: "—", text: "[Hermes \(status): announcing \(runId)]"))
+        case .announced(let runId):
+            if announcingRunId == runId { announcingRunId = nil }
+            onRunAnnounced?(runId)
+        case .linkError(let error):
+            errorText = error.message
+            onLinkError?(error)
+        }
+    }
+
+    /// Pull-to-refresh and the foreground path both land here.
+    func refreshRuns() async {
+        if let coordinator {
+            await coordinator.refreshRuns()
+            return
+        }
+        guard let paired = pairedDesktop ?? KeychainStore.loadPairing() else { return }
+        do {
+            runs = try await LinkClient(paired: paired).listTasks(undelivered: false)
+        } catch let error as LinkError {
+            errorText = error.message
+            if error.clearsPairing { onLinkError?(error) }
+        } catch {
+            errorText = "Could not list Hermes runs."
         }
     }
 
@@ -401,13 +503,19 @@ final class LiveSessionController: ObservableObject {
 struct ContentView: View {
     @StateObject private var controller = LiveSessionController()
     @StateObject private var pairing = PairingController()
+    @StateObject private var runs = RunsController()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var apiKey: String = KeychainStore.loadKey() ?? ""
     @State private var keySaved: Bool = KeychainStore.loadKey() != nil
+    /// Developer fallback only. A paired session's voice is baked into the
+    /// token by the Mac, so the phone has no say and does not pretend to.
     @State private var voice: String = "Iapetus"
     @State private var showUnpairConfirm = false
+    @State private var showDebug = false
 
     var body: some View {
         NavigationStack {
+            ScrollView {
             VStack(alignment: .leading, spacing: 12) {
 
                 if let paired = pairing.paired {
@@ -424,12 +532,14 @@ struct ContentView: View {
                 }
 
                 HStack {
-                    TextField("Voice", text: $voice)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .disabled(controller.isRunning)
-                        .frame(maxWidth: 140)
+                    if pairing.paired == nil {
+                        TextField("Voice", text: $voice)
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .disabled(controller.isRunning)
+                            .frame(maxWidth: 140)
+                    }
 
                     Spacer()
 
@@ -462,28 +572,50 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // Route + engine diagnostics. This is what a tester reads back
-                // when Bluetooth playback misbehaves.
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(controller.audioStatus.routeLine)
-                    Text(controller.audioStatus.engineLine)
-                    Text("in \(controller.audioChunksReceived) chunks → scheduled \(controller.audioStatus.buffersScheduled) · dropped \(controller.audioStatus.buffersDropped) · last route event: \(controller.audioStatus.lastRouteChange) · last rebuild: \(controller.audioStatus.lastRebuildReason)")
+                if let brief = controller.pendingProposal {
+                    pendingProposalCard(brief)
                 }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Text(controller.errorText.isEmpty ? " " : controller.errorText)
                     .font(.caption)
                     .foregroundStyle(.red)
                     .lineLimit(3)
 
+                if pairing.paired != nil {
+                    Divider()
+                    RunsSection(controller: runs, announcingRunId: controller.announcingRunId)
+                }
+
+                Divider()
+
+                // Kept, because this is what a tester reads back when
+                // Bluetooth playback misbehaves — but collapsed by default so
+                // the screen stays usable.
+                DisclosureGroup("Debug", isExpanded: $showDebug) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(controller.audioStatus.routeLine)
+                        Text(controller.audioStatus.engineLine)
+                        Text("in \(controller.audioChunksReceived) chunks → scheduled \(controller.audioStatus.buffersScheduled) · dropped \(controller.audioStatus.buffersDropped) · last route event: \(controller.audioStatus.lastRouteChange) · last rebuild: \(controller.audioStatus.lastRebuildReason)")
+                        ForEach(Array(controller.toolLog.suffix(40).enumerated()), id: \.offset) { entry in
+                            Text(entry.element)
+                        }
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                }
+                .font(.caption)
+
                 Divider()
 
                 transcript
+                    .frame(minHeight: 180)
             }
             .padding()
+            }
+            .refreshable { await runs.refresh(notifying: false) }
             .navigationTitle("Iris Live Probe")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -496,7 +628,43 @@ struct ContentView: View {
             controller.onLinkError = { [pairing] error in
                 pairing.handle(linkError: error)
             }
-            Task { await pairing.refreshStatus() }
+            runs.onLinkError = { [pairing] error in
+                pairing.handle(linkError: error)
+            }
+            // A completion Iris just spoke should not also buzz.
+            controller.onRunAnnounced = { [runs] runId in
+                runs.notifier.markHandled(runId)
+            }
+            runs.configure(paired: pairing.paired)
+            Task {
+                await pairing.refreshStatus()
+                await runs.refresh(notifying: true)
+                if !controller.isRunning { runs.startPolling() }
+            }
+        }
+        .onChange(of: pairing.paired) { _, paired in
+            runs.configure(paired: paired)
+            if paired == nil { runs.stopPolling() } else { runs.startPolling() }
+        }
+        .onChange(of: controller.runs) { _, list in
+            // The live session already polled; keep one list, not two.
+            if !list.isEmpty { runs.adopt(list) }
+        }
+        .onChange(of: controller.isRunning) { _, running in
+            // The session's own 2 s poll replaces the quiet background watch.
+            if running { runs.stopPolling() } else { runs.startPolling() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, pairing.paired != nil else { return }
+            Task { await runs.refresh(notifying: true) }
+        }
+        .onChange(of: runs.notifier.openRunId) { _, runId in
+            guard let runId, !runId.isEmpty else { return }
+            runs.notifier.openRunId = nil
+            Task { await runs.read(runId) }
+        }
+        .sheet(item: $runs.openResult) { result in
+            RunResultView(sheet: result)
         }
         .sheet(item: $pairing.pendingOffer) { offer in
             PairingSheet(offer: offer, pairing: pairing)
@@ -532,10 +700,21 @@ struct ContentView: View {
             Text(paired.address)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+            // Two different outages, named as such: a failing request means
+            // the Mac/tailnet is down; hermesReachable:false means the Mac is
+            // up and Hermes is not. Dispatch is refused with the reason, but
+            // plain conversation still works.
             if let status = pairing.status {
-                Text("Iris is reachable · agent \(status.hermesReachable ? "reachable" : "unreachable") · \(status.liveModel)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                if status.hermesReachable {
+                    Text("Iris on the Mac is reachable · Hermes is reachable · \(status.liveModel)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Iris on the Mac is reachable, but Hermes is not responding on it. You can still talk to Iris; sending work to Hermes will be refused until it is running again.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else if !pairing.statusMessage.isEmpty {
                 Text(pairing.statusMessage)
                     .font(.caption2)
@@ -615,11 +794,34 @@ struct ContentView: View {
         }
     }
 
+    /// The compact indicator the gate's state deserves: while this is on
+    /// screen, nothing has been sent to Hermes yet.
+    @ViewBuilder
+    private func pendingProposalCard(_ brief: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "hourglass")
+                Text("Waiting for your answer — nothing sent yet")
+                    .font(.caption.weight(.semibold))
+            }
+            Text(brief)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(6)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
     private func startSession() {
         if let paired = pairing.paired {
+            // Notifications only start mattering once this phone has work in
+            // flight, so this is where they are asked for.
+            Task { await runs.notifier.requestPermissionIfNeeded() }
             controller.startWithLink(
                 paired: paired,
-                voice: pairing.status?.voice.isEmpty == false ? pairing.status!.voice : voice,
                 model: pairing.status?.liveModel ?? ""
             )
         } else {

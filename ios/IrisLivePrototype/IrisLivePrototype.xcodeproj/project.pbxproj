@@ -8,21 +8,50 @@
 
 /* Begin PBXBuildFile section */
 		0450E9051ABA8EBDFE8DADE4 /* IrisLivePrototypeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */; };
+		242F33237CA96DEB30F0D166 /* SessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42DF4B8978A738812ADC7459 /* SessionCoordinator.swift */; };
 		306F17CF209EA9FD83960288 /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8775E3B82E471D52AED945 /* AudioEngine.swift */; };
+		30C24039DA90DFE03E075F90 /* ToolRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3852C1772D95F3A6EC9237BE /* ToolRouterTests.swift */; };
 		557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4189F82A2B6C03639E03D5A1 /* LiveClient.swift */; };
+		5902882E93962A4CF6C1E5D7 /* RunsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8C241185697D6C0DEF8682F /* RunsView.swift */; };
+		72B953FD5F4EB16F8700BFA7 /* RunNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 025FEF6CACEBD7DF8AAC87CE /* RunNotifier.swift */; };
 		76D237D2589D1C516C5D2B2F /* LinkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2BE592157D9D352AB0E03FA /* LinkClient.swift */; };
 		8049F0B862DB3E0EB3CB0C2C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8261FF5C0D663124876807 /* ContentView.swift */; };
 		D2761F13790975C08B358508 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5A3592095F69FC15A205046 /* KeychainStore.swift */; };
+		D985CC56BA83BB1A3BBAB852 /* DispatchGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9EBD17A6B834DB2DCC6813D /* DispatchGate.swift */; };
+		DC0910E04DEDB701A6C1CA26 /* LinkTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E9D8390F9F9C32CDD0A0709 /* LinkTasks.swift */; };
+		E674095376CE083F2734612B /* DispatchGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7D15764E1D509276093802 /* DispatchGateTests.swift */; };
+		EEFBB86A57B38AC00AFEAC36 /* FakeLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */; };
+		F1CC123246E9E23C45CD569A /* ToolRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9FED6DA41D3A314036A5068 /* ToolRouter.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		DEC00F5719F5821BAB4B4B7D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 89462752CB9066DBED9C6254 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 189C268FD55B305BA2FC6E86;
+			remoteInfo = IrisLivePrototype;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		025FEF6CACEBD7DF8AAC87CE /* RunNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunNotifier.swift; sourceTree = "<group>"; };
+		3852C1772D95F3A6EC9237BE /* ToolRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolRouterTests.swift; sourceTree = "<group>"; };
 		4189F82A2B6C03639E03D5A1 /* LiveClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveClient.swift; sourceTree = "<group>"; };
+		42DF4B8978A738812ADC7459 /* SessionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCoordinator.swift; sourceTree = "<group>"; };
+		42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeLinkService.swift; sourceTree = "<group>"; };
 		570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisLivePrototypeApp.swift; sourceTree = "<group>"; };
 		5E8775E3B82E471D52AED945 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
+		9E9D8390F9F9C32CDD0A0709 /* LinkTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTasks.swift; sourceTree = "<group>"; };
 		A2BE592157D9D352AB0E03FA /* LinkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkClient.swift; sourceTree = "<group>"; };
 		A321262959C14EB0E6390036 /* IrisLivePrototype.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = IrisLivePrototype.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A5A3592095F69FC15A205046 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		C9FED6DA41D3A314036A5068 /* ToolRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolRouter.swift; sourceTree = "<group>"; };
+		D4383840DB1117778529524E /* IrisLivePrototypeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IrisLivePrototypeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D9EBD17A6B834DB2DCC6813D /* DispatchGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatchGate.swift; sourceTree = "<group>"; };
+		DA7D15764E1D509276093802 /* DispatchGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatchGateTests.swift; sourceTree = "<group>"; };
 		DD8261FF5C0D663124876807 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		F8C241185697D6C0DEF8682F /* RunsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -30,6 +59,7 @@
 			isa = PBXGroup;
 			children = (
 				C9EAEB45189D2928BDEEBFC0 /* Sources */,
+				BDEFA18BB3E50ACDAF69B242 /* Tests */,
 				21BA29332446833EEFC17820 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -38,8 +68,19 @@
 			isa = PBXGroup;
 			children = (
 				A321262959C14EB0E6390036 /* IrisLivePrototype.app */,
+				D4383840DB1117778529524E /* IrisLivePrototypeTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		BDEFA18BB3E50ACDAF69B242 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				DA7D15764E1D509276093802 /* DispatchGateTests.swift */,
+				42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */,
+				3852C1772D95F3A6EC9237BE /* ToolRouterTests.swift */,
+			);
+			path = Tests;
 			sourceTree = "<group>";
 		};
 		C9EAEB45189D2928BDEEBFC0 /* Sources */ = {
@@ -47,10 +88,16 @@
 			children = (
 				5E8775E3B82E471D52AED945 /* AudioEngine.swift */,
 				DD8261FF5C0D663124876807 /* ContentView.swift */,
+				D9EBD17A6B834DB2DCC6813D /* DispatchGate.swift */,
 				570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */,
 				A5A3592095F69FC15A205046 /* KeychainStore.swift */,
 				A2BE592157D9D352AB0E03FA /* LinkClient.swift */,
+				9E9D8390F9F9C32CDD0A0709 /* LinkTasks.swift */,
 				4189F82A2B6C03639E03D5A1 /* LiveClient.swift */,
+				025FEF6CACEBD7DF8AAC87CE /* RunNotifier.swift */,
+				F8C241185697D6C0DEF8682F /* RunsView.swift */,
+				42DF4B8978A738812ADC7459 /* SessionCoordinator.swift */,
+				C9FED6DA41D3A314036A5068 /* ToolRouter.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -75,6 +122,24 @@
 			productReference = A321262959C14EB0E6390036 /* IrisLivePrototype.app */;
 			productType = "com.apple.product-type.application";
 		};
+		5464833E2D661BB65C55F5B6 /* IrisLivePrototypeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8D766AB21795AA381FF346F3 /* Build configuration list for PBXNativeTarget "IrisLivePrototypeTests" */;
+			buildPhases = (
+				5164E9C679BCAA0FF6F9285E /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D40F1FA2CD2A40AB4C46CA7F /* PBXTargetDependency */,
+			);
+			name = IrisLivePrototypeTests;
+			packageProductDependencies = (
+			);
+			productName = IrisLivePrototypeTests;
+			productReference = D4383840DB1117778529524E /* IrisLivePrototypeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -85,6 +150,10 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					189C268FD55B305BA2FC6E86 = {
+						DevelopmentTeam = YA3FM9C24T;
+						ProvisioningStyle = Automatic;
+					};
+					5464833E2D661BB65C55F5B6 = {
 						DevelopmentTeam = YA3FM9C24T;
 						ProvisioningStyle = Automatic;
 					};
@@ -105,6 +174,7 @@
 			projectRoot = "";
 			targets = (
 				189C268FD55B305BA2FC6E86 /* IrisLivePrototype */,
+				5464833E2D661BB65C55F5B6 /* IrisLivePrototypeTests */,
 			);
 		};
 /* End PBXProject section */
@@ -116,14 +186,38 @@
 			files = (
 				306F17CF209EA9FD83960288 /* AudioEngine.swift in Sources */,
 				8049F0B862DB3E0EB3CB0C2C /* ContentView.swift in Sources */,
+				D985CC56BA83BB1A3BBAB852 /* DispatchGate.swift in Sources */,
 				0450E9051ABA8EBDFE8DADE4 /* IrisLivePrototypeApp.swift in Sources */,
 				D2761F13790975C08B358508 /* KeychainStore.swift in Sources */,
 				76D237D2589D1C516C5D2B2F /* LinkClient.swift in Sources */,
+				DC0910E04DEDB701A6C1CA26 /* LinkTasks.swift in Sources */,
 				557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */,
+				72B953FD5F4EB16F8700BFA7 /* RunNotifier.swift in Sources */,
+				5902882E93962A4CF6C1E5D7 /* RunsView.swift in Sources */,
+				242F33237CA96DEB30F0D166 /* SessionCoordinator.swift in Sources */,
+				F1CC123246E9E23C45CD569A /* ToolRouter.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5164E9C679BCAA0FF6F9285E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E674095376CE083F2734612B /* DispatchGateTests.swift in Sources */,
+				EEFBB86A57B38AC00AFEAC36 /* FakeLinkService.swift in Sources */,
+				30C24039DA90DFE03E075F90 /* ToolRouterTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D40F1FA2CD2A40AB4C46CA7F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 189C268FD55B305BA2FC6E86 /* IrisLivePrototype */;
+			targetProxy = DEC00F5719F5821BAB4B4B7D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		12EE2409685C7510C0DD5516 /* Release */ = {
@@ -267,6 +361,46 @@
 			};
 			name = Release;
 		};
+		9CC8C6700BECB90580CF60C5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = YA3FM9C24T;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.iris.liveprototype.tests;
+				SDKROOT = iphoneos;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/IrisLivePrototype.app/IrisLivePrototype";
+			};
+			name = Debug;
+		};
+		AE84C14C859AD820C0F02AF0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = YA3FM9C24T;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.iris.liveprototype.tests;
+				SDKROOT = iphoneos;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/IrisLivePrototype.app/IrisLivePrototype";
+			};
+			name = Release;
+		};
 		E4B4F278ED6C8FDDDDD8B5ED /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -304,6 +438,15 @@
 			buildConfigurations = (
 				2DBED26D76206571D1B53342 /* Debug */,
 				12EE2409685C7510C0DD5516 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8D766AB21795AA381FF346F3 /* Build configuration list for PBXNativeTarget "IrisLivePrototypeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9CC8C6700BECB90580CF60C5 /* Debug */,
+				AE84C14C859AD820C0F02AF0 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
