@@ -2,19 +2,162 @@
 //  ContentView.swift
 //  IrisLivePrototype
 //
-//  Minimal harness: paste a key, press Start, talk, watch transcripts.
-//  The key lives in memory only — it is never written to disk and never
-//  printed to the console.
+//  Two ways in:
+//
+//    Paired (the real path) — the phone scanned an `iris-link://pair` QR from
+//    the Iris desktop, holds its own device credential, and fetches a fresh
+//    single-use Gemini token from the Mac immediately before each session. No
+//    Gemini API key is ever on the phone.
+//
+//    Unpaired (developer fallback) — paste a key and talk directly to Gemini.
+//    Only available while unpaired, and labelled as what it is.
+//
+//  No secret in this file is ever printed, logged, or put in an error string.
 //
 
 import SwiftUI
 import AVKit
+import UIKit
+
+// MARK: - Pairing
+
+@MainActor
+final class PairingController: ObservableObject {
+
+    /// The stored pairing, or nil when this phone is unpaired.
+    @Published private(set) var paired: PairedDesktop?
+    /// A scanned offer waiting for the user to compare codes and tap Pair.
+    @Published var pendingOffer: PairingOffer?
+    @Published var isPairing = false
+    @Published var message: String = ""
+    /// Red when the message is a refusal rather than progress.
+    @Published var messageIsError = false
+    @Published private(set) var status: LinkStatus?
+    @Published private(set) var statusMessage: String = ""
+
+    init() {
+        paired = KeychainStore.loadPairing()
+    }
+
+    var isPaired: Bool { paired != nil }
+
+    // MARK: Deep link
+
+    /// Called from `.onOpenURL`. Parsing is strict and the failure is shown to
+    /// the user — a refused link is a security event, not a silent no-op.
+    func handle(url: URL) {
+        do {
+            let offer = try IrisLinkDeepLink.parse(url)
+            message = ""
+            messageIsError = false
+            pendingOffer = offer
+        } catch let error as PairingLinkError {
+            pendingOffer = nil
+            messageIsError = true
+            message = error.message
+        } catch {
+            pendingOffer = nil
+            messageIsError = true
+            message = "That pairing link could not be read."
+        }
+    }
+
+    // MARK: Pair / unpair
+
+    func confirmPair() async {
+        guard let offer = pendingOffer, !isPairing else { return }
+        isPairing = true
+        message = ""
+        messageIsError = false
+        defer { isPairing = false }
+        do {
+            let result = try await LinkClient.pair(
+                host: offer.host,
+                port: offer.port,
+                secret: offer.secret,
+                deviceName: UIDevice.current.name
+            )
+            let record = PairedDesktop(
+                host: offer.host,
+                port: offer.port,
+                deviceId: result.deviceId,
+                credential: result.credential,
+                desktopName: offer.desktopName
+            )
+            guard KeychainStore.savePairing(record) else {
+                messageIsError = true
+                message = "Pairing succeeded but this phone could not store the credential in its Keychain."
+                return
+            }
+            paired = record
+            pendingOffer = nil
+            message = "Paired with \(record.desktopName)."
+            await refreshStatus()
+        } catch let error as LinkError {
+            messageIsError = true
+            message = error.message
+        } catch {
+            messageIsError = true
+            message = "Pairing failed."
+        }
+    }
+
+    func cancelPending() {
+        pendingOffer = nil
+    }
+
+    /// Local only: forgets the credential on this phone. The desktop's own
+    /// revoke button is what removes it on that side.
+    func unpair() {
+        KeychainStore.deletePairing()
+        paired = nil
+        status = nil
+        statusMessage = ""
+        message = "This phone is no longer paired."
+        messageIsError = false
+    }
+
+    // MARK: Status
+
+    func refreshStatus() async {
+        guard let paired else { return }
+        do {
+            status = try await LinkClient(paired: paired).status()
+            statusMessage = ""
+        } catch let error as LinkError {
+            status = nil
+            handle(linkError: error)
+        } catch {
+            status = nil
+            statusMessage = "Could not reach Iris on your Mac."
+        }
+    }
+
+    /// The one place a refusal becomes a state change. A revoked or unknown
+    /// credential clears the pairing and says so — never an empty result and
+    /// never dressed up as a network problem.
+    func handle(linkError error: LinkError) {
+        if error.clearsPairing {
+            KeychainStore.deletePairing()
+            paired = nil
+            status = nil
+            messageIsError = true
+            message = error.message
+            statusMessage = ""
+        } else {
+            statusMessage = error.message
+        }
+    }
+}
+
+// MARK: - Live session
 
 @MainActor
 final class LiveSessionController: ObservableObject {
 
     enum Status: String {
         case idle = "Idle"
+        case authorizing = "Getting a token from your Mac…"
         case connecting = "Connecting…"
         case ready = "Live"
         case closed = "Closed"
@@ -35,33 +178,87 @@ final class LiveSessionController: ObservableObject {
     /// Route + engine diagnostics, polled off the audio engine.
     @Published var audioStatus = AudioStatus()
 
+    /// Raised when the Link service refuses this phone, so the view can drop
+    /// back to the pairing flow.
+    var onLinkError: ((LinkError) -> Void)?
+
     private var client: LiveClient?
     private var pump: Task<Void, Never>?
     private var statusPoll: Task<Void, Never>?
+    private var starter: Task<Void, Never>?
     private let audio = AudioEngine()
 
+    // MARK: Start
+
+    /// The paired path: fetch a single-use token from the Mac, then connect
+    /// with it. The token is never stored and never reused — it is minted with
+    /// `uses: 1` and a 60 s window to start a session.
+    func startWithLink(paired: PairedDesktop, voice: String, model: String) {
+        guard !isRunning else { return }
+        reset()
+        status = .authorizing
+        isRunning = true
+        starter = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let minted = try await LinkClient(paired: paired).geminiToken()
+                guard !Task.isCancelled else { return }
+                self.begin(
+                    credential: .ephemeralToken(minted.token),
+                    model: minted.model.isEmpty ? model : minted.model,
+                    voice: voice
+                )
+            } catch let error as LinkError {
+                self.isRunning = false
+                self.status = .idle
+                self.errorText = error.message
+                self.onLinkError?(error)
+            } catch {
+                self.isRunning = false
+                self.status = .idle
+                self.errorText = "Could not get a session token from your Mac."
+            }
+        }
+    }
+
+    /// Developer fallback, unpaired only.
     func start(apiKey: String, voice: String) {
         guard !isRunning else { return }
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {
-            errorText = "Paste an API key or ephemeral token first."
+            errorText = "Paste an API key first, or pair this phone with your Mac."
             return
         }
+        reset()
+        isRunning = true
+        begin(credential: .apiKey(key), model: nil, voice: voice)
+    }
 
+    private func reset() {
         errorText = ""
         lines = []
         audioChunksReceived = 0
         audioBytesReceived = 0
         audioStatus = AudioStatus()
+    }
+
+    private func begin(credential: LiveClient.Credential, model: String?, voice: String) {
         status = .connecting
-        isRunning = true
         startStatusPolling()
 
-        let client = LiveClient(config: .init(
-            apiKey: key,
-            voiceName: voice,
-            systemInstruction: "You are a terse voice assistant. Answer in one or two short sentences unless asked for more."
-        ))
+        let config: LiveClient.Config
+        let instruction = "You are a terse voice assistant. Answer in one or two short sentences unless asked for more."
+        if let model, !model.isEmpty {
+            config = .init(
+                credential: credential,
+                model: model,
+                voiceName: voice,
+                systemInstruction: instruction
+            )
+        } else {
+            config = .init(credential: credential, voiceName: voice, systemInstruction: instruction)
+        }
+        let client = LiveClient(config: config)
         self.client = client
 
         pump = Task { [weak self] in
@@ -78,6 +275,8 @@ final class LiveSessionController: ObservableObject {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        starter?.cancel()
+        starter = nil
         statusPoll?.cancel()
         statusPoll = nil
         audio.stop()
@@ -129,6 +328,13 @@ final class LiveSessionController: ObservableObject {
         case .sessionResumption:
             break
 
+        case .authorizationFailed(let code, let reason):
+            // Not a network error and not something to retry: the token was
+            // refused. Say so, and stop.
+            errorText = "Gemini refused this session's token (close \(code)"
+                + (reason.map { ": \($0)" } ?? "")
+                + "). Tap Start to ask your Mac for a fresh one."
+
         case .error(let message):
             errorText = message
 
@@ -138,7 +344,9 @@ final class LiveSessionController: ObservableObject {
             statusPoll?.cancel()
             statusPoll = nil
             audio.stop()
-            errorText = "Closed (code \(code))" + (reason.map { ": \($0)" } ?? "")
+            if errorText.isEmpty {
+                errorText = "Closed (code \(code))" + (reason.map { ": \($0)" } ?? "")
+            }
         }
     }
 
@@ -188,36 +396,31 @@ final class LiveSessionController: ObservableObject {
     }
 }
 
+// MARK: - View
+
 struct ContentView: View {
     @StateObject private var controller = LiveSessionController()
+    @StateObject private var pairing = PairingController()
     @State private var apiKey: String = KeychainStore.loadKey() ?? ""
     @State private var keySaved: Bool = KeychainStore.loadKey() != nil
     @State private var voice: String = "Iapetus"
+    @State private var showUnpairConfirm = false
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
 
-                SecureField("Gemini API key or ephemeral token", text: $apiKey)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(controller.isRunning)
+                if let paired = pairing.paired {
+                    pairedCard(paired)
+                } else {
+                    unpairedControls
+                }
 
-                if keySaved {
-                    HStack {
-                        Text("Key saved in this iPhone's Keychain")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Forget key", role: .destructive) {
-                            KeychainStore.deleteKey()
-                            apiKey = ""
-                            keySaved = false
-                        }
+                if !pairing.message.isEmpty {
+                    Text(pairing.message)
                         .font(.caption)
-                        .disabled(controller.isRunning)
-                    }
+                        .foregroundStyle(pairing.messageIsError ? Color.red : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 HStack {
@@ -240,9 +443,7 @@ struct ContentView: View {
                         if controller.isRunning {
                             controller.stop()
                         } else {
-                            let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !trimmed.isEmpty { keySaved = KeychainStore.saveKey(trimmed) }
-                            controller.start(apiKey: apiKey, voice: voice)
+                            startSession()
                         }
                     }
                     .buttonStyle(.borderedProminent)
@@ -280,44 +481,240 @@ struct ContentView: View {
 
                 Divider()
 
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 6) {
-                            ForEach(controller.lines) { line in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(line.speaker)
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                    Text(line.text)
-                                        .font(.body)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(line.id)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .onChange(of: controller.lines.count) {
-                        if let last = controller.lines.last {
-                            withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                        }
-                    }
-                }
+                transcript
             }
             .padding()
             .navigationTitle("Iris Live Probe")
             .navigationBarTitleDisplayMode(.inline)
+        }
+        .onOpenURL { url in
+            pairing.handle(url: url)
+        }
+        .onAppear {
+            // `pairing` is the StateObject SwiftUI owns; the session
+            // controller holds no reference back, so there is no cycle.
+            controller.onLinkError = { [pairing] error in
+                pairing.handle(linkError: error)
+            }
+            Task { await pairing.refreshStatus() }
+        }
+        .sheet(item: $pairing.pendingOffer) { offer in
+            PairingSheet(offer: offer, pairing: pairing)
+        }
+        .confirmationDialog(
+            "Unpair this phone?",
+            isPresented: $showUnpairConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Unpair this phone", role: .destructive) {
+                controller.stop()
+                pairing.unpair()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes the credential stored on this iPhone. To stop it working from the Mac's side too, revoke the device in Iris on the desktop.")
+        }
+    }
+
+    // MARK: Pieces
+
+    @ViewBuilder
+    private func pairedCard(_ paired: PairedDesktop) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "laptopcomputer.and.iphone")
+                Text("Paired with \(paired.desktopName)")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Unpair this phone", role: .destructive) { showUnpairConfirm = true }
+                    .font(.caption)
+            }
+            Text(paired.address)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            if let status = pairing.status {
+                Text("Iris is reachable · agent \(status.hermesReachable ? "reachable" : "unreachable") · \(status.liveModel)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if !pairing.statusMessage.isEmpty {
+                Text(pairing.statusMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Sessions use a single-use token from your Mac. No Gemini key is stored on this phone.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private var unpairedControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Not paired")
+                .font(.subheadline.weight(.semibold))
+            Text("In Iris on your Mac, open Pair a device and scan the QR code with the iPhone Camera app. Both devices must be on your tailnet.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DisclosureGroup("Developer fallback: API key") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Only used while this phone is unpaired. A paired phone never holds a Gemini key.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    SecureField("Gemini API key", text: $apiKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(controller.isRunning)
+                    if keySaved {
+                        Button("Forget key", role: .destructive) {
+                            KeychainStore.deleteKey()
+                            apiKey = ""
+                            keySaved = false
+                        }
+                        .font(.caption)
+                        .disabled(controller.isRunning)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .font(.caption)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(controller.lines) { line in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(line.speaker)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(line.text)
+                                .font(.body)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id(line.id)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .onChange(of: controller.lines.count) {
+                if let last = controller.lines.last {
+                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+            }
+        }
+    }
+
+    private func startSession() {
+        if let paired = pairing.paired {
+            controller.startWithLink(
+                paired: paired,
+                voice: pairing.status?.voice.isEmpty == false ? pairing.status!.voice : voice,
+                model: pairing.status?.liveModel ?? ""
+            )
+        } else {
+            let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { keySaved = KeychainStore.saveKey(trimmed) }
+            controller.start(apiKey: apiKey, voice: voice)
         }
     }
 
     private var statusColor: Color {
         switch controller.status {
         case .idle: return .gray
-        case .connecting: return .orange
+        case .authorizing, .connecting: return .orange
         case .ready: return .green
         case .closed: return .gray
         }
     }
+}
+
+// MARK: - Pairing confirmation sheet
+
+/// The user compares this number with the one on the Mac before anything is
+/// sent. The secret itself is never shown.
+struct PairingSheet: View {
+    let offer: PairingOffer
+    @ObservedObject var pairing: PairingController
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Pair with this Mac?")
+                    .font(.title3.weight(.semibold))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(offer.desktopName)
+                        .font(.headline)
+                    Text(offer.address)
+                        .font(.subheadline.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Confirmation code")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(offer.code)
+                        .font(.system(size: 44, weight: .bold, design: .monospaced))
+                        .kerning(4)
+                    Text("Check that these six digits match the code Iris is showing on the Mac. If they do not match, do not pair.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if pairing.messageIsError && !pairing.message.isEmpty {
+                    Text(pairing.message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer()
+
+                Button {
+                    Task {
+                        await pairing.confirmPair()
+                        if pairing.paired != nil { dismiss() }
+                    }
+                } label: {
+                    if pairing.isPairing {
+                        ProgressView().frame(maxWidth: .infinity)
+                    } else {
+                        Text("Pair").frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(pairing.isPairing)
+
+                Button("Not now", role: .cancel) {
+                    pairing.cancelPending()
+                    dismiss()
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .padding()
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .interactiveDismissDisabled(pairing.isPairing)
+    }
+}
+
+extension PairingOffer: Identifiable {
+    /// Identifies the sheet without exposing the secret.
+    public var id: String { "\(address)#\(code)" }
 }
 
 #Preview {

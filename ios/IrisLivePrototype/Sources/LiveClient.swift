@@ -48,6 +48,12 @@ public enum LiveEvent: Sendable {
     case sessionResumption(handle: String?, resumable: Bool)
     /// Non-fatal or fatal error text.
     case error(String)
+    /// The server refused our credential. Verified behaviour: an ephemeral
+    /// token that is expired, already used, or outside its start window is not
+    /// rejected at the handshake — the socket opens and is then closed with
+    /// code 1011 and a reason string. This is an authorization failure, never a
+    /// network blip, and must never be blindly retried.
+    case authorizationFailed(code: Int, reason: String?)
     /// Socket closed. `code` is the URLSessionWebSocketTask close code raw value.
     case closed(code: Int, reason: String?)
 }
@@ -56,12 +62,43 @@ public enum LiveEvent: Sendable {
 
 public actor LiveClient {
 
+    /// How this session authenticates. The two modes reach *different*
+    /// endpoints — see `endpoint(for:)`.
+    public enum Credential: Sendable {
+        /// A long-lived Gemini API key. On the phone this is the developer
+        /// fallback only; a paired phone never holds one.
+        case apiKey(String)
+        /// An ephemeral token (`auth_tokens/…`) minted by the Iris desktop.
+        case ephemeralToken(String)
+
+        var value: String {
+            switch self {
+            case .apiKey(let key): return key
+            case .ephemeralToken(let token): return token
+            }
+        }
+    }
+
     public struct Config: Sendable {
-        public var apiKey: String
+        public var credential: Credential
         public var model: String
         public var voiceName: String
         public var systemInstruction: String?
         public var enableTranscription: Bool
+
+        public init(
+            credential: Credential,
+            model: String = "models/gemini-3.1-flash-live-preview",
+            voiceName: String = "Iapetus",
+            systemInstruction: String? = nil,
+            enableTranscription: Bool = true
+        ) {
+            self.credential = credential
+            self.model = model
+            self.voiceName = voiceName
+            self.systemInstruction = systemInstruction
+            self.enableTranscription = enableTranscription
+        }
 
         public init(
             apiKey: String,
@@ -70,11 +107,13 @@ public actor LiveClient {
             systemInstruction: String? = nil,
             enableTranscription: Bool = true
         ) {
-            self.apiKey = apiKey
-            self.model = model
-            self.voiceName = voiceName
-            self.systemInstruction = systemInstruction
-            self.enableTranscription = enableTranscription
+            self.init(
+                credential: .apiKey(apiKey),
+                model: model,
+                voiceName: voiceName,
+                systemInstruction: systemInstruction,
+                enableTranscription: enableTranscription
+            )
         }
     }
 
@@ -82,14 +121,43 @@ public actor LiveClient {
         case idle, connecting, ready, closed
     }
 
-    private static let endpoint =
-        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+    private static let host = "wss://generativelanguage.googleapis.com"
+
+    /// An API key and an ephemeral token are NOT interchangeable on this
+    /// socket. Read out of `@google/genai` (dist/index.mjs, Live.connect):
+    /// a credential beginning `auth_tokens/` switches the RPC to
+    /// `BidiGenerateContentConstrained`, the API version to `v1alpha`, and the
+    /// query parameter from `key` to `access_token`. The "constrained" half of
+    /// the name is the token's `liveConnectConstraints` — the model and
+    /// response modalities were fixed when the desktop minted it.
+    static func endpoint(for credential: Credential) -> (url: String, parameter: String, value: String) {
+        switch credential {
+        case .apiKey(let key):
+            return (
+                "\(host)/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                "key",
+                key
+            )
+        case .ephemeralToken(let token):
+            return (
+                "\(host)/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained",
+                "access_token",
+                token
+            )
+        }
+    }
+
+    /// A server-side close this soon after opening is a refused credential
+    /// dressed up as a connection, not a network problem.
+    private static let authorizationCloseWindow: TimeInterval = 2.0
 
     private let config: Config
     private var urlSession: URLSession?
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var continuation: AsyncStream<LiveEvent>.Continuation?
+    private var openedAt: Date?
+    private var sawSetupComplete = false
     private(set) public var state: State = .idle
 
     public init(config: Config) {
@@ -109,12 +177,13 @@ public actor LiveClient {
         guard socket == nil else { return }
         state = .connecting
 
-        guard var comps = URLComponents(string: Self.endpoint) else {
+        let route = Self.endpoint(for: config.credential)
+        guard var comps = URLComponents(string: route.url) else {
             emit(.error("Bad endpoint URL"))
             return
         }
-        // The key travels as a query parameter; never log the resulting URL.
-        comps.queryItems = [URLQueryItem(name: "key", value: config.apiKey)]
+        // The credential travels as a query parameter; never log the URL.
+        comps.queryItems = [URLQueryItem(name: route.parameter, value: route.value)]
         guard let url = comps.url else {
             emit(.error("Could not build endpoint URL"))
             return
@@ -129,6 +198,8 @@ public actor LiveClient {
 
         urlSession = session
         socket = task
+        openedAt = Date()
+        sawSetupComplete = false
         task.resume()
 
         emit(.opened)
@@ -249,12 +320,25 @@ public actor LiveClient {
         guard state != .closed else { return }
         let code = socket?.closeCode.rawValue ?? 0
         let reason = socket?.closeReason.flatMap { String(data: $0, encoding: .utf8) }
+        let elapsed = openedAt.map { Date().timeIntervalSince($0) } ?? .greatestFiniteMagnitude
         state = .closed
-        // A clean server-side close surfaces here as an error too; report both.
-        emit(.error("Socket receive ended: \(error.localizedDescription)"))
+        if isAuthorizationClose(code: code, elapsed: elapsed) {
+            emit(.authorizationFailed(code: code, reason: reason))
+        } else {
+            // A clean server-side close surfaces here as an error too; report both.
+            emit(.error("Socket receive ended: \(error.localizedDescription)"))
+        }
         emit(.closed(code: code, reason: reason))
         continuation?.finish()
         continuation = nil
+    }
+
+    /// 1011 at any point, or *any* server close before the session ever became
+    /// usable, is the shape a refused token takes on this API.
+    private func isAuthorizationClose(code: Int, elapsed: TimeInterval) -> Bool {
+        if code == 1011 { return true }
+        if !sawSetupComplete && elapsed <= Self.authorizationCloseWindow { return true }
+        return false
     }
 
     private func handle(_ message: URLSessionWebSocketTask.Message) {
@@ -280,6 +364,7 @@ public actor LiveClient {
     private func route(_ root: [String: Any]) {
         if root["setupComplete"] != nil {
             state = .ready
+            sawSetupComplete = true
             emit(.setupComplete)
         }
 

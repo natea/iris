@@ -93,6 +93,8 @@ for await event in stream {
         print("goAway \(timeLeft ?? "")")
     case .sessionResumption:
         break
+    case .authorizationFailed(let code, let reason):
+        print("authorization failed: close=\(code) reason=\(reason ?? "-")")
     case .error(let message):
         print("error: \(message)")
     case .closed(let code, let reason):

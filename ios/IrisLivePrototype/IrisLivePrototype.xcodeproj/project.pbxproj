@@ -10,6 +10,7 @@
 		0450E9051ABA8EBDFE8DADE4 /* IrisLivePrototypeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */; };
 		306F17CF209EA9FD83960288 /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8775E3B82E471D52AED945 /* AudioEngine.swift */; };
 		557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4189F82A2B6C03639E03D5A1 /* LiveClient.swift */; };
+		76D237D2589D1C516C5D2B2F /* LinkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2BE592157D9D352AB0E03FA /* LinkClient.swift */; };
 		8049F0B862DB3E0EB3CB0C2C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8261FF5C0D663124876807 /* ContentView.swift */; };
 		D2761F13790975C08B358508 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5A3592095F69FC15A205046 /* KeychainStore.swift */; };
 /* End PBXBuildFile section */
@@ -18,6 +19,7 @@
 		4189F82A2B6C03639E03D5A1 /* LiveClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveClient.swift; sourceTree = "<group>"; };
 		570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisLivePrototypeApp.swift; sourceTree = "<group>"; };
 		5E8775E3B82E471D52AED945 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
+		A2BE592157D9D352AB0E03FA /* LinkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkClient.swift; sourceTree = "<group>"; };
 		A321262959C14EB0E6390036 /* IrisLivePrototype.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = IrisLivePrototype.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A5A3592095F69FC15A205046 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		DD8261FF5C0D663124876807 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -47,6 +49,7 @@
 				DD8261FF5C0D663124876807 /* ContentView.swift */,
 				570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */,
 				A5A3592095F69FC15A205046 /* KeychainStore.swift */,
+				A2BE592157D9D352AB0E03FA /* LinkClient.swift */,
 				4189F82A2B6C03639E03D5A1 /* LiveClient.swift */,
 			);
 			path = Sources;
@@ -115,6 +118,7 @@
 				8049F0B862DB3E0EB3CB0C2C /* ContentView.swift in Sources */,
 				0450E9051ABA8EBDFE8DADE4 /* IrisLivePrototypeApp.swift in Sources */,
 				D2761F13790975C08B358508 /* KeychainStore.swift in Sources */,
+				76D237D2589D1C516C5D2B2F /* LinkClient.swift in Sources */,
 				557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

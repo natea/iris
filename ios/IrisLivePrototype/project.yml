@@ -23,6 +23,28 @@ targets:
       properties:
         CFBundleDisplayName: Iris Live
         NSMicrophoneUsageDescription: "Iris streams your voice to the Gemini Live API so you can talk to the assistant."
+        # Scanning the desktop's pairing QR opens iris-link://pair?… directly in
+        # this app. The scheme exists so a phone camera never offers to
+        # web-search a live pairing secret.
+        CFBundleURLTypes:
+          - CFBundleURLName: app.iris.liveprototype.pair
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - iris-link
+        # Iris Link is reached at a Tailscale 100.64/10 address over the utun
+        # interface, which is not the immediate local network, so this prompt is
+        # not expected to appear. Declared anyway: if iOS ever does classify a
+        # tailnet peer as local, the alternative is a silent failure.
+        NSLocalNetworkUsageDescription: "Iris connects to the Iris app on your Mac over your private Tailscale network to start voice sessions."
+        # PROTOTYPE ONLY. Observed on device: iOS blocks plain HTTP to a Tailscale
+        # IP with NSURLErrorAppTransportSecurityRequiresSecureConnection (-1022);
+        # ATS does apply to IP literals, and exception domains cannot name an IP
+        # range. The app only ever connects to a 100.64.0.0/10 address it parsed
+        # from a pairing QR (LinkClient refuses anything else) and to Google over
+        # TLS, so this is contained — but the real app must not ship it. The fix
+        # is HTTPS on the Mac's MagicDNS name with a `tailscale cert` certificate.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UISupportedInterfaceOrientations:

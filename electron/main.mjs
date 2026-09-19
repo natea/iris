@@ -3864,7 +3864,37 @@ async function mintGeminiToken() {
       uses: 1,
       expireTime: expiresAt,
       newSessionExpireTime: newSessionExpiresAt,
-      liveConnectConstraints: { model, config: { responseModalities: ["AUDIO"] } },
+      // With lockAdditionalFields unset, the token's config REPLACES whatever
+      // the client sends in its setup frame: a phone asking for a voice or a
+      // system prompt is silently ignored (observed on device — the default
+      // voice spoke, in the language it guessed). That is the behavior we
+      // want: the desktop, not the phone, decides who Iris is. So everything
+      // the session needs must be baked in here.
+      liveConnectConstraints: {
+        model,
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: process.env.GEMINI_LIVE_VOICE || "Zephyr" },
+            },
+          },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          systemInstruction: {
+            parts: [
+              {
+                text: [
+                  `You are Iris, the realtime voice assistant for ${userDisplayName()}, speaking with them on their phone.`,
+                  `${userDisplayName()} speaks English. Always respond in English, and interpret unclear audio as English.`,
+                  "Keep voice responses natural and short.",
+                  "You cannot dispatch work to Hermes from the phone yet. If asked, say that plainly rather than guessing.",
+                ].join("\n"),
+              },
+            ],
+          },
+        },
+      },
     },
   });
   if (!token?.name) throw new Error("Gemini returned no token name.");
@@ -3960,7 +3990,8 @@ function createIrisLinkOffer() {
   });
   return {
     ok: true,
-    payload: `iris-link://pair?${query.toString()}`,
+    // URLSearchParams writes spaces as "+", which iOS URL parsing leaves literal.
+    payload: `iris-link://pair?${query.toString().replace(/\+/g, "%20")}`,
     code: offer.code,
     expiresAt: offer.expiresAt,
   };

@@ -2,7 +2,7 @@
 
 - [x] 1.1 Prove a Swift `URLSessionWebSocketTask` client can open a Gemini Live session, stream 16 kHz PCM up, and play 24 kHz PCM back — verify by holding a 30-second spoken exchange from a throwaway iOS app
 - [x] 1.2 Mint an ephemeral token (`AuthTokenService.CreateToken`) from a script and connect the prototype with it instead of an API key — verify the session opens with the token and is refused after expiry
-- [ ] 1.3 Reach a stub service bound to the Mac's Tailscale address from the iPhone — verify it answers over the tailnet, is refused without a credential, and is unreachable from a non-tailnet network
+- [x] 1.3 Reach a stub service bound to the Mac's Tailscale address from the iPhone — verify it answers over the tailnet, is refused without a credential, and is unreachable from a non-tailnet network
 - [ ] 1.4 Prototype `StartIrisSessionIntent` with `openAppWhenRun = true` and time "Hey Siri" → microphone live — verify capture starts and record whether the launch feels like an assistant or an app launch
 - [ ] 1.5 Prototype a question-shaped Siri phrase ("ask Iris to research X") and verify whether the string reaches the intent or Siri answers it itself; if intercepted, settle on imperative phrasing before any UI work
 
@@ -14,6 +14,7 @@
 - [ ] 2.4 Add the paired-device list with names, last-seen times, and revoke — verify a revoked credential is refused on its next request
 - [x] 2.5 Write unit tests for pairing issue/expire/revoke in `test/` alongside the existing suites — verify `npm test` covers the refusal paths
 - [ ] 2.6 Rate-limit authenticated Iris Link routes per device (token minting and run creation especially) and keep a per-device audit log of dispatched runs — verify a burst beyond the limit is refused with a distinct error and that a dispatched run appears in the log with its device id
+- [ ] 2.7 Serve Iris Link over HTTPS on the Mac's MagicDNS name with a `tailscale cert` certificate, put that hostname in the pairing QR, and have the phone accept only `*.ts.net` hosts — verify the iOS app pairs and fetches a token with no App Transport Security exception in its Info.plist
 
 ## 3. Hermes reachability
 
@@ -25,7 +26,7 @@
 
 - [ ] 4.1 Create the SwiftUI app target with microphone and notification permission flows — verify a refused permission shows the explanation path, not a broken session
 - [ ] 4.2 Implement pairing on the phone: register the `iris-link://` scheme, redeem a scanned offer with Iris Link, show the 6-digit code for comparison, and store the device credential in the Keychain — verify scanning the desktop QR opens the app, the device appears in the desktop list, and a revoked device returns to the pairing screen
-- [ ] 4.3 Connect with an ephemeral token fetched from Iris Link instead of an API key — verify a full spoken session with no Gemini API key on the phone, and that an early 1011 close is reported as not authorized
+- [x] 4.3 Connect with an ephemeral token fetched from Iris Link instead of an API key — verify a full spoken session with no Gemini API key on the phone, and that an early 1011 close is reported as not authorized
 - [ ] 4.4 Implement the Live WebSocket client (setup, realtime input, server content, transcripts, tool calls, session resumption) — verify against the prototype's recorded message flow
 - [ ] 4.5 Implement capture and playback with `.playAndRecord`, echo cancellation, and barge-in flush — verify playback stops within a perceptibly immediate interval when the user speaks over it
 - [ ] 4.6 Handle route changes and interruptions — verify a headset connect mid-session and an incoming call each behave as `ios-voice-companion` specifies
