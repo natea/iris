@@ -113,6 +113,18 @@ export function accentOptions(current) {
   return options;
 }
 
+// Case-insensitive lookup against the canonical voice catalogue.
+// Returns: null when nothing was supplied (caller should fall back to a
+// default), the canonical (correctly-cased) name on a match, or undefined
+// when a name was supplied but matches nothing — callers treat that as
+// invalid input, never as "not supplied".
+export function normalizeVoiceName(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const match = GEMINI_VOICES.find((voice) => voice.name.toLowerCase() === raw.toLowerCase());
+  return match ? match.name : undefined;
+}
+
 export function voiceOptions(current) {
   const options = GEMINI_VOICES.map((voice) => ({
     value: voice.name,

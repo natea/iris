@@ -64,7 +64,7 @@ import { HermesGatewayClient } from "./hermesGatewayClient.mjs";
 import { HermesInteractiveTransport } from "./hermesInteractiveTransport.mjs";
 import { isSleepIntent } from "./sleepIntent.mjs";
 import { HERMES_FUNCTION_DECLARATIONS } from "./hermesTools.mjs";
-import { buildMobileLiveConfig } from "./mobileSession.mjs";
+import { buildMobileLiveConfig, buildMobilePreviewConfig } from "./mobileSession.mjs";
 import { createPairingStore } from "./pairingStore.mjs";
 import { createIrisLinkServer } from "./irisLinkServer.mjs";
 import { createApnsClient, resolveApnsConfig } from "./apnsClient.mjs";
@@ -72,9 +72,12 @@ import { createPushNotifier } from "./pushNotifier.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
 import { createRunSteps, parseStepsSince } from "./runSteps.mjs";
 import {
+  GEMINI_VOICES,
   accentInstruction,
   accentOptions,
   accentReminder,
+  normalizeVoiceName,
+  resolveAccent,
   voiceOptions,
 } from "./voiceDialect.mjs";
 import {
@@ -3840,6 +3843,10 @@ function installAppMenu() {
 const IRIS_LINK_DEFAULT_PORT = 8765;
 const LINK_TOKEN_TTL_SECONDS = 30 * 60;
 const LINK_NEW_SESSION_TTL_SECONDS = 60;
+// A voice preview is a few seconds of audio, never a working session: short
+// lifetimes so a stray token cannot be reused as a cut-rate real session.
+const LINK_PREVIEW_TOKEN_TTL_SECONDS = 2 * 60;
+const LINK_PREVIEW_NEW_SESSION_TTL_SECONDS = 30;
 let pairingStore = null;
 let irisLink = null;
 let irisLinkState = { enabled: false, listening: false, host: null, port: null, reason: "disabled" };
@@ -3918,19 +3925,40 @@ const pushNotifier = createPushNotifier({
 
 // Ephemeral tokens are what let the phone hold a credential that expires in
 // minutes instead of a Gemini key that has to be rotated everywhere.
-// Optional: an accent line for the phone's prompt, from the same setting the
-// Settings panel already surfaces. Empty unless the user set one.
-function mobileAccentInstruction() {
-  const accent = String(process.env.GEMINI_LIVE_ACCENT || "").trim();
-  return accent ? `Speak English with a ${accent} accent.` : "";
-}
-
-async function mintGeminiToken() {
+//
+// `voice` is optional and, when supplied, MUST be a case-insensitive match
+// for a name in GEMINI_VOICES — normalizeVoiceName() is the single place that
+// decides that, so an unvalidated string never reaches the token config.
+// `purpose` selects between a real session config and a minimal preview
+// config (see buildMobilePreviewConfig in mobileSession.mjs): the two must
+// never share a token, since a preview has no tools and no personal context.
+async function mintGeminiToken({ voice: requestedVoice, purpose = "session" } = {}) {
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
   if (!apiKey) throw new Error("No Gemini API key is configured.");
+
+  const normalizedVoice = normalizeVoiceName(requestedVoice);
+  if (normalizedVoice === undefined) return { error: "invalid_voice" };
+  const voice = normalizedVoice ?? (process.env.GEMINI_LIVE_VOICE || "Zephyr");
+
+  const isPreview = purpose === "preview";
   const model = process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview";
-  const expiresAt = new Date(Date.now() + LINK_TOKEN_TTL_SECONDS * 1000).toISOString();
-  const newSessionExpiresAt = new Date(Date.now() + LINK_NEW_SESSION_TTL_SECONDS * 1000).toISOString();
+  const ttlSeconds = isPreview ? LINK_PREVIEW_TOKEN_TTL_SECONDS : LINK_TOKEN_TTL_SECONDS;
+  const newSessionTtlSeconds = isPreview
+    ? LINK_PREVIEW_NEW_SESSION_TTL_SECONDS
+    : LINK_NEW_SESSION_TTL_SECONDS;
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+  const newSessionExpiresAt = new Date(Date.now() + newSessionTtlSeconds * 1000).toISOString();
+
+  const liveConfig = isPreview
+    ? buildMobilePreviewConfig({ voice, accent: process.env.GEMINI_LIVE_ACCENT })
+    : buildMobileLiveConfig({
+        userName: userDisplayName(),
+        voice,
+        accentInstruction: accentInstruction(process.env.GEMINI_LIVE_ACCENT),
+        accentReminder: accentReminder(process.env.GEMINI_LIVE_ACCENT),
+        contextParts: userContextParts(),
+      });
+
   // Ephemeral tokens require v1alpha (verified in scripts/test-live-ephemeral-token.mjs).
   const tokenAi = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } });
   const token = await tokenAi.authTokens.create({
@@ -3946,21 +3974,17 @@ async function mintGeminiToken() {
       // the session needs must be baked in here.
       liveConnectConstraints: {
         model,
-        // Built by electron/mobileSession.mjs from the desktop's own Hermes
-        // tool schemas and prompt rules, so the phone's Iris behaves like the
-        // desktop's. Verified against the real token endpoint: tools,
-        // sessionResumption and both transcription fields are accepted.
-        config: buildMobileLiveConfig({
-          userName: userDisplayName(),
-          voice: process.env.GEMINI_LIVE_VOICE || "Zephyr",
-          accentInstruction: mobileAccentInstruction(),
-          contextParts: userContextParts(),
-        }),
+        // Built by electron/mobileSession.mjs — a real session from the
+        // desktop's own Hermes tool schemas and prompt rules, a preview from
+        // a minimal, tool-free, context-free config. Verified against the
+        // real token endpoint: tools, sessionResumption and both
+        // transcription fields are accepted.
+        config: liveConfig,
       },
     },
   });
   if (!token?.name) throw new Error("Gemini returned no token name.");
-  return { token: token.name, expiresAt, newSessionExpiresAt, model };
+  return { token: token.name, expiresAt, newSessionExpiresAt, model, voice, purpose };
 }
 
 // One shape for every task the phone sees, in the snake_case the rest of the
@@ -4109,7 +4133,9 @@ async function startIrisLink() {
       userName: userDisplayName(),
       liveModel: process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview",
       voice: process.env.GEMINI_LIVE_VOICE || "Zephyr",
-      accent: process.env.GEMINI_LIVE_ACCENT || "",
+      accent: resolveAccent(process.env.GEMINI_LIVE_ACCENT)?.label || "",
+      voices: GEMINI_VOICES,
+      defaultVoice: process.env.GEMINI_LIVE_VOICE || "Zephyr",
     }),
     log: (entry) => emitEvent({ type: "log", level: entry.level || "info", message: entry.message }),
   });

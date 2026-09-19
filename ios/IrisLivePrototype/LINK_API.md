@@ -1025,3 +1025,129 @@ Live progress adds no new route, so §9 still governs. Concretely:
 Steps for a finished run stay answerable for about **10 minutes**, then are
 evicted and the run reports `steps_complete: false`. Fetch the result (§4)
 rather than relying on steps after that.
+
+---
+
+## 13. Voice selection and preview
+
+This section is additive to §3. `POST /link/gemini-token` now accepts an
+optional JSON body; sending none (or `{}`) is exactly today's behavior.
+
+### 13.1 `POST /link/gemini-token` — request body
+
+```json
+{ "voice": "Algenib", "purpose": "preview" }
+```
+
+Both fields are optional and independent.
+
+- `voice` — a name from the catalogue in `GET /link/status` → `voices`
+  (§13.3), matched **case-insensitively** and normalized to the catalogue's
+  canonical casing server-side. Omit it to get the desktop's configured
+  default (`default_voice` in `GET /link/status`). An unknown name is refused
+  with `400 { "error": "invalid_voice" }` — never sent through to the model.
+- `purpose` — `"session"` (default) or `"preview"`. Unknown values are refused
+  with `400 { "error": "invalid_purpose" }`.
+
+`200` response (adds two fields to what §3 documents):
+
+```json
+{
+  "token": "auth_tokens/…",
+  "expiresAt": "ISO-8601",
+  "newSessionExpiresAt": "ISO-8601",
+  "model": "models/gemini-3.1-flash-live-preview",
+  "voice": "Algenib",
+  "purpose": "preview"
+}
+```
+
+`voice` is the voice actually baked into the token (the normalized name, or
+the default when none was requested). `purpose` echoes what was minted.
+
+### 13.2 What a `purpose:"session"` token changes
+
+Nothing about the contract in §3 changes except that the voice can now be
+chosen: the token's config still carries the full Hermes-capable Iris (tools,
+personal context, dispatch gate, everything in §5–§7), just with
+`speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName` set to the requested
+(or default) voice, and the configured accent instruction folded into the
+system instruction as before.
+
+**The chosen voice applies from the next new session, not the current one.**
+A live session keeps the voice it was started with — asking the desktop for a
+different voice does not change how the current conversation sounds. To hear
+a new voice in real use, disconnect (or let the session end) and start a new
+one with a fresh `purpose:"session"` token for that voice.
+
+### 13.3 `GET /link/status` — new fields
+
+`GET /link/status` (§3) now also returns:
+
+```json
+{
+  "voices": [
+    { "name": "Zephyr", "style": "Bright" },
+    { "name": "Algenib", "style": "Gravelly" }
+  ],
+  "default_voice": "Zephyr",
+  "accent": "British (RP, London)"
+}
+```
+
+- `voices` — the full catalogue (30 entries) for building a picker: show
+  `"<name> · <style>"`.
+- `default_voice` — the name a `purpose:"session"` token gets when the phone
+  sends no `voice`. This is what a real session sounds like today; it is also
+  a sane initial selection the first time the phone has no locally-stored
+  choice.
+- `accent` — the desktop's configured accent as a **display label** (e.g.
+  `"British (RP, London)"`, or `"Custom: …"` for free text), `""` when none is
+  configured. Every preview and every real session already speaks with this
+  accent baked in; there is no separate accent parameter to send.
+
+### 13.4 The phone's voice, stored locally
+
+The phone stores its chosen voice locally (e.g. `UserDefaults`) and sends it
+as `voice` on **every** `purpose:"session"` token request from then on. There
+is no server-side per-device voice preference — if the phone sends no
+`voice`, it gets `default_voice`. Seed the local choice from `default_voice`
+on first run / first successful `GET /link/status`.
+
+### 13.5 Previewing a voice
+
+A preview is an ordinary Gemini Live connection, opened exactly like a real
+session (§3: `v1alpha`, token as the API key, **empty setup config** — the
+token's config replaces it here too), except:
+
+1. Mint a token with `{"voice": "<candidate>", "purpose": "preview"}`.
+2. Connect with that token.
+3. Send **one** text turn — the content does not matter, the preview config
+   ignores it and always answers with the fixed sample line, but send exactly
+   `"Go."` so behavior stays predictable across the model's input handling:
+   ```
+   session.sendRealtimeInput(text: "Go.")
+   ```
+4. Play the audio parts as they arrive; stop and close the session as soon as
+   `serverContent.turnComplete` is seen. The reply is one short fixed line
+   (name of the voice + a sample sentence) with the configured accent, so this
+   is a few seconds of audio, not an open-ended conversation.
+5. Close the session. Do not reuse a preview token or reconnect with it —
+   it is `uses: 1` and short-lived (token expires in 2 minutes; the new-session
+   window is 30 s), and it carries none of the real session's tools or
+   context, so nothing else useful can be done with it anyway.
+
+**Previews must not run while a real session is live.** Do not open a preview
+connection while the phone already has an active `purpose:"session"`
+WebSocket — they are two separate Live connections and would compete for the
+same audio I/O and the same visible "Iris is listening" state. Gate the
+preview UI on the same "no live session" check the dispatch gate (§6) already
+needs, and if a preview is requested mid-session, refuse it locally rather
+than asking the server.
+
+A preview token's config is intentionally minimal: `AUDIO` response modality
+only, the requested voice, `outputAudioTranscription` on (so the sample text
+can be shown as a caption), and **no** `tools`, **no** personal/user context,
+and **no** Hermes surface of any kind. A phone that connects with an empty
+setup frame on a preview token gets only the fixed sample line — never a
+capability the real session has.

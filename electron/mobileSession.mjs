@@ -1,4 +1,5 @@
 import { HERMES_FUNCTION_DECLARATIONS } from "./hermesTools.mjs";
+import { accentInstruction as accentInstructionFor } from "./voiceDialect.mjs";
 
 // ===== Mobile session config =====
 //
@@ -70,9 +71,11 @@ export function mobileToolNames(declarations = HERMES_FUNCTION_DECLARATIONS) {
 export function buildMobileSystemInstructionText({
   userName = "the user",
   accentInstruction = "",
+  accentReminder = "",
 } = {}) {
   const name = String(userName || "the user").trim() || "the user";
   const accent = String(accentInstruction || "").trim();
+  const reminder = String(accentReminder || "").trim();
   return [
     `You are Iris, the realtime voice front-end for ${name}. You are running on ${name}'s phone.`,
     `${name} speaks English. Always respond in English, and interpret unclear or noisy audio as English.`,
@@ -90,7 +93,7 @@ export function buildMobileSystemInstructionText({
     `When proposing a Hermes task, preserve the goal and every concrete detail ${name} explicitly supplied — names, numbers, dates, budgets, URLs, file paths, named tools, constraints, and output format. Hermes cannot hear this conversation, so the brief must stand alone. Do not add workflow mechanics, scripts, databases, pages, or implementation constraints that you merely inferred from memory.`,
     "For a repeat or small follow-up to a task already dispatched in this Hermes session, write a short continuation brief naming the earlier task and tell Hermes to reuse its previous work instead of rebuilding the entire brief.",
     'If submit_hermes_task returns "blocked", follow its instructions exactly. Keep the same proposal when it says confirmation is still settling or the proposal ID should be retried; do not repeatedly restage or reread an unchanged brief.',
-    `When SYSTEM_EVENT_SESSION_START arrives, greet ${name} once as instructed. On session resume, acknowledge briefly without reintroducing yourself.`,
+    `When SYSTEM_EVENT_SESSION_START arrives, greet ${name} once as instructed.${reminder ? ` ${reminder}` : ""} On session resume, acknowledge briefly without reintroducing yourself.`,
     `When SYSTEM_EVENT_HERMES_COMPLETE arrives, briefly announce the real result and ask whether ${name} wants to discuss it. Resume an interrupted topic only if you can name it from conversation context.`,
     "You are on the phone, so some things are only possible on the Mac. If a Hermes run needs a clarification, a dangerous-command approval you cannot resolve here, a sudo password, or any secret, say plainly that it needs attention on the Mac. Never ask for a password or secret by voice, and never invent an answer on the user's behalf.",
     "Keep voice responses natural and short.",
@@ -105,6 +108,7 @@ export function buildMobileLiveConfig({
   userName = "the user",
   voice = "Zephyr",
   accentInstruction = "",
+  accentReminder = "",
   contextParts = [],
   declarations = HERMES_FUNCTION_DECLARATIONS,
 } = {}) {
@@ -129,8 +133,54 @@ export function buildMobileLiveConfig({
     ],
     systemInstruction: {
       parts: [
-        { text: buildMobileSystemInstructionText({ userName, accentInstruction }) },
+        { text: buildMobileSystemInstructionText({ userName, accentInstruction, accentReminder }) },
         ...extraParts,
+      ],
+    },
+  };
+}
+
+// ===== Mobile voice preview =====
+//
+// A "preview" token is minted so the phone can hear a candidate voice before
+// committing to it. It must be nothing like a real session: no tools, no
+// personal context, no Hermes anything — just the requested voice reading one
+// fixed line, so a phone connecting with an empty client config cannot coax
+// it into doing anything else. The line matches the desktop's own preview
+// (previewVoice() in main.mjs) so the two surfaces sound the same.
+export function buildMobilePreviewSampleLine(voice = "Zephyr") {
+  const voiceName = String(voice || "Zephyr");
+  return `Hi, I'm Iris. This is the ${voiceName} voice. Shall we have a look at what's on your schedule today?`;
+}
+
+/**
+ * The full config for a preview token's liveConnectConstraints. Pure and
+ * self-contained: `accent` is the raw configured accent value (a preset id or
+ * free text, e.g. process.env.GEMINI_LIVE_ACCENT), resolved here the same way
+ * the desktop's own preview resolves it, so a preview sounds like the real
+ * thing.
+ */
+export function buildMobilePreviewConfig({ voice = "Zephyr", accent = "" } = {}) {
+  const voiceName = String(voice || "Zephyr");
+  const line = buildMobilePreviewSampleLine(voiceName);
+  const accentText = accentInstructionFor(accent);
+  return {
+    responseModalities: ["AUDIO"],
+    speechConfig: {
+      voiceConfig: {
+        prebuiltVoiceConfig: { voiceName },
+      },
+    },
+    outputAudioTranscription: {},
+    systemInstruction: {
+      parts: [
+        {
+          text: [
+            "You are a short voice sample for Iris's voice picker, nothing more.",
+            `No matter what the user's turn says, respond with exactly this line and nothing else: "${line}"`,
+            accentText,
+          ].filter(Boolean).join("\n"),
+        },
       ],
     },
   };

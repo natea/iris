@@ -5,6 +5,8 @@ import {
   MOBILE_HERMES_TOOL_NAMES,
   buildMobileHermesDeclarations,
   buildMobileLiveConfig,
+  buildMobilePreviewConfig,
+  buildMobilePreviewSampleLine,
   buildMobileSystemInstructionText,
   mobileToolNames,
 } from "../electron/mobileSession.mjs";
@@ -137,4 +139,64 @@ test("a missing user name degrades to a neutral one rather than 'undefined'", ()
   const text = buildMobileSystemInstructionText({});
   assert.equal(text.includes("undefined"), false);
   assert.match(text, /the user/);
+});
+
+test("the accent reminder is optional and lands in the session-start guidance when set", () => {
+  const without = buildMobileSystemInstructionText({ userName: "Nate" });
+  assert.match(without, /When SYSTEM_EVENT_SESSION_START arrives, greet Nate once as instructed\. On session resume/);
+
+  const withReminder = buildMobileSystemInstructionText({
+    userName: "Nate",
+    accentReminder: "Speak with your British accent.",
+  });
+  assert.match(
+    withReminder,
+    /greet Nate once as instructed\. Speak with your British accent\. On session resume/,
+  );
+});
+
+test("buildMobileLiveConfig threads the accent reminder into the system instruction", () => {
+  const config = buildMobileLiveConfig({
+    userName: "Nate",
+    accentInstruction: "Voice accent rule: always speak English with a Scottish accent.",
+    accentReminder: "Speak with your Scottish accent.",
+  });
+  const text = config.systemInstruction.parts[0].text;
+  assert.match(text, /Voice accent rule: always speak English with a Scottish accent\./);
+  assert.match(text, /Speak with your Scottish accent\./);
+});
+
+test("buildMobilePreviewSampleLine reuses the desktop's preview sentence", () => {
+  assert.equal(
+    buildMobilePreviewSampleLine("Algenib"),
+    "Hi, I'm Iris. This is the Algenib voice. Shall we have a look at what's on your schedule today?",
+  );
+});
+
+test("buildMobilePreviewConfig is minimal: no tools, no context, the fixed line, the requested voice", () => {
+  const config = buildMobilePreviewConfig({ voice: "Algenib" });
+  assert.deepEqual(config.responseModalities, ["AUDIO"]);
+  assert.equal(config.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, "Algenib");
+  assert.deepEqual(config.outputAudioTranscription, {});
+  assert.equal(config.tools, undefined);
+  assert.equal(config.inputAudioTranscription, undefined);
+  assert.equal(config.sessionResumption, undefined);
+  assert.equal(config.systemInstruction.parts.length, 1);
+  const text = config.systemInstruction.parts[0].text;
+  assert.match(
+    text,
+    /Hi, I'm Iris\. This is the Algenib voice\. Shall we have a look at what's on your schedule today\?/,
+  );
+  // No Hermes, no personal context — just the sample line and voice.
+  assert.equal(text.includes("Hermes"), false);
+  assert.equal(text.includes("USER CONTEXT"), false);
+});
+
+test("buildMobilePreviewConfig includes the configured accent instruction", () => {
+  const withAccent = buildMobilePreviewConfig({ voice: "Zephyr", accent: "british" });
+  const text = withAccent.systemInstruction.parts[0].text;
+  assert.match(text, /Voice accent rule: always speak English with a Standard Southern British English/);
+
+  const withoutAccent = buildMobilePreviewConfig({ voice: "Zephyr" });
+  assert.equal(withoutAccent.systemInstruction.parts[0].text.includes("Voice accent rule"), false);
 });

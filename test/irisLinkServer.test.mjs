@@ -53,11 +53,13 @@ async function startLink(options = {}) {
     pairingStore: store,
     mintGeminiToken:
       options.mintGeminiToken ||
-      (async () => ({
+      (async ({ voice, purpose = "session" } = {}) => ({
         token: "auth_tokens/ephemeral-123",
         expiresAt: "2026-01-01T00:00:00.000Z",
         newSessionExpiresAt: "2026-01-01T00:01:00.000Z",
         model: "models/gemini-3.1-flash-live-preview",
+        voice: voice || "Zephyr",
+        purpose,
       })),
     tasks: options.tasks,
     checkHermesReachable: options.checkHermesReachable,
@@ -72,6 +74,11 @@ async function startLink(options = {}) {
       liveModel: "models/gemini-3.1-flash-live-preview",
       voice: "Zephyr",
       accent: "cyan",
+      voices: [
+        { name: "Zephyr", style: "Bright" },
+        { name: "Algenib", style: "Gravelly" },
+      ],
+      defaultVoice: "Zephyr",
     })),
     log: (entry) => logs.push(entry),
   });
@@ -238,6 +245,11 @@ test("status reports device identity and nothing secret", async (t) => {
     liveModel: "models/gemini-3.1-flash-live-preview",
     voice: "Zephyr",
     accent: "cyan",
+    voices: [
+      { name: "Zephyr", style: "Bright" },
+      { name: "Algenib", style: "Gravelly" },
+    ],
+    default_voice: "Zephyr",
   });
   const serialized = JSON.stringify(status);
   assert.equal(serialized.includes(SHARED_KEY), false);
@@ -257,6 +269,10 @@ test("the token route mints for a paired device and hides upstream failures", as
   const minted = await ok.json();
   assert.equal(minted.token, "auth_tokens/ephemeral-123");
   assert.equal(minted.model, "models/gemini-3.1-flash-live-preview");
+  // No body: today's behavior, unchanged. The injected minter still gets to
+  // pick the default voice and "session" purpose.
+  assert.equal(minted.voice, "Zephyr");
+  assert.equal(minted.purpose, "session");
 
   const failing = await startLink({
     mintGeminiToken: async () => {
@@ -279,6 +295,145 @@ test("the token route mints for a paired device and hides upstream failures", as
     headers: { Authorization: `Bearer ${body.credential}` },
   });
   assert.equal(wrongMethod.status, 405);
+});
+
+test("the token route accepts a requested voice and echoes what the minter used", async (t) => {
+  const calls = [];
+  const link = await startLink({
+    mintGeminiToken: async (args) => {
+      calls.push(args);
+      return {
+        token: "auth_tokens/ephemeral-456",
+        expiresAt: "2026-01-01T00:00:00.000Z",
+        newSessionExpiresAt: "2026-01-01T00:01:00.000Z",
+        model: "models/gemini-3.1-flash-live-preview",
+        voice: "Algenib",
+        purpose: args.purpose,
+      };
+    },
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+
+  const response = await fetch(`${link.origin}/link/gemini-token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ voice: "Algenib" }),
+  });
+  assert.equal(response.status, 200);
+  const minted = await response.json();
+  assert.equal(minted.voice, "Algenib");
+  assert.equal(minted.purpose, "session");
+  // The route passes the requested voice through verbatim; case-insensitive
+  // normalization to the canonical catalogue name is the injected minter's
+  // job (mirrors main.mjs's normalizeVoiceName), not this file's.
+  assert.deepEqual(calls, [{ voice: "Algenib", purpose: "session" }]);
+});
+
+test("a lowercase voice name is passed through unmangled for the minter to normalize", async (t) => {
+  const calls = [];
+  const link = await startLink({
+    mintGeminiToken: async (args) => {
+      calls.push(args.voice);
+      return {
+        token: "auth_tokens/ephemeral-789",
+        model: "models/gemini-3.1-flash-live-preview",
+        voice: "Algenib", // the canonical name a real normalizer would return
+        purpose: args.purpose,
+      };
+    },
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+
+  const response = await fetch(`${link.origin}/link/gemini-token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ voice: "algenib" }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).voice, "Algenib");
+  assert.deepEqual(calls, ["algenib"]);
+});
+
+test("an invalid voice from the minter is reported as a 400, not a mint failure", async (t) => {
+  const link = await startLink({
+    mintGeminiToken: async () => ({ error: "invalid_voice" }),
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+
+  const response = await fetch(`${link.origin}/link/gemini-token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ voice: "not-a-real-voice" }),
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_voice" });
+});
+
+test("purpose:preview is minted with a short-lived token and echoed back", async (t) => {
+  const calls = [];
+  const link = await startLink({
+    mintGeminiToken: async (args) => {
+      calls.push(args);
+      return {
+        token: "auth_tokens/ephemeral-preview",
+        expiresAt: "2026-01-01T00:02:00.000Z",
+        newSessionExpiresAt: "2026-01-01T00:00:30.000Z",
+        model: "models/gemini-3.1-flash-live-preview",
+        voice: "Zephyr",
+        purpose: "preview",
+      };
+    },
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+
+  const response = await fetch(`${link.origin}/link/gemini-token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ purpose: "preview" }),
+  });
+  assert.equal(response.status, 200);
+  const minted = await response.json();
+  assert.equal(minted.purpose, "preview");
+  assert.deepEqual(calls, [{ voice: undefined, purpose: "preview" }]);
+});
+
+test("an unknown purpose is refused before the minter is ever called", async (t) => {
+  let called = false;
+  const link = await startLink({
+    mintGeminiToken: async () => {
+      called = true;
+      return { token: "auth_tokens/should-not-happen" };
+    },
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+
+  const response = await fetch(`${link.origin}/link/gemini-token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ purpose: "karaoke" }),
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_purpose" });
+  assert.equal(called, false);
+});
+
+test("a malformed gemini-token body is refused as invalid_json", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body } = await pair(link);
+
+  const response = await fetch(`${link.origin}/link/gemini-token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+    body: "not json",
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_json" });
 });
 
 test("an allowlisted proxy call carries the shared key upstream, not the client credential", async (t) => {
