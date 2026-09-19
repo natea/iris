@@ -30,6 +30,13 @@ test("presets resolve case-insensitively into specific accent instructions", () 
   }
 });
 
+test("the American preset steers explicitly instead of relying on the model's default", () => {
+  const instruction = accentInstruction("american");
+  assert.match(instruction, /General American/);
+  assert.match(instruction, /American spelling/);
+  assert.equal(accentReminder("american"), "Speak with your American accent.");
+});
+
 test("free text is treated as a custom accent, normalized and capped", () => {
   const entry = resolveAccent("  Yorkshire English,\n as heard in Leeds ");
   assert.equal(entry.custom, true);

@@ -43,6 +43,12 @@ export const GEMINI_VOICES = [
 
 export const ENGLISH_ACCENTS = [
   {
+    id: "american",
+    label: "American (General)",
+    accent: "General American English accent as heard in the Midwestern United States",
+    style: "Use American spelling, vocabulary, and phrasing (for example 'elevator', 'apartment', 'line', 'cell phone').",
+  },
+  {
     id: "british",
     label: "British (RP, London)",
     accent: "Standard Southern British English (Received Pronunciation) accent as heard in London, England",
