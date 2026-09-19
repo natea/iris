@@ -215,6 +215,28 @@ public struct LinkToken: Sendable, Equatable {
     public let expiresAt: String?
     public let newSessionExpiresAt: String?
     public let model: String
+    /// True only when the desktop confirms it baked the requested resumption
+    /// handle into this token's `liveConnectConstraints.config`.
+    ///
+    /// Absent (and therefore false) on any desktop build that does not
+    /// implement `resume_handle`, which is the honest answer: without the
+    /// handle in the token, the phone is starting a NEW conversation and has
+    /// to say so. It is never inferred from the request having been sent.
+    public let resumed: Bool
+
+    public init(
+        token: String,
+        expiresAt: String? = nil,
+        newSessionExpiresAt: String? = nil,
+        model: String = "",
+        resumed: Bool = false
+    ) {
+        self.token = token
+        self.expiresAt = expiresAt
+        self.newSessionExpiresAt = newSessionExpiresAt
+        self.model = model
+        self.resumed = resumed
+    }
 }
 
 // MARK: - Errors
@@ -395,8 +417,29 @@ public struct LinkClient: Sendable {
     /// Mints a fresh ephemeral Gemini token. Single use, with a 60 s window to
     /// start a session, so callers fetch one immediately before connecting and
     /// never keep it.
-    public func geminiToken() async throws -> LinkToken {
-        let json = try await send(path: "/link/gemini-token", method: "POST", body: [:], authenticated: true)
+    ///
+    /// `resumeHandle` asks the Mac to reconnect this session into an existing
+    /// conversation. It has to be asked for here rather than sent on the
+    /// socket: on the constrained endpoint the token's config replaces the
+    /// client's setup frame, `sessionResumption` included, so a handle the
+    /// phone puts in its own setup is silently ignored (verified against the
+    /// real API — see `LiveClient.Config.resumeHandle`). The only path that
+    /// works is a token minted with the handle already inside it.
+    ///
+    /// A single use is spent per connection either way: a token that has
+    /// opened a session is refused with 1011 "Token has been used too many
+    /// times" if it is offered again, handle or no handle. So every reconnect
+    /// mints a new token.
+    ///
+    /// The desktop answers with `resumed: true` when it honored the handle.
+    /// A build that does not implement `resume_handle` simply omits the field
+    /// and mints an ordinary fresh-conversation token, which the caller then
+    /// correctly treats as a new session.
+    public func geminiToken(resumeHandle: String? = nil) async throws -> LinkToken {
+        var body: [String: Any] = [:]
+        let handle = resumeHandle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !handle.isEmpty { body["resume_handle"] = handle }
+        let json = try await send(path: "/link/gemini-token", method: "POST", body: body, authenticated: true)
         guard let token = json["token"] as? String, !token.isEmpty else {
             throw LinkError.badResponse("token response carried no token")
         }
@@ -404,7 +447,8 @@ public struct LinkClient: Sendable {
             token: token,
             expiresAt: json["expiresAt"] as? String,
             newSessionExpiresAt: json["newSessionExpiresAt"] as? String,
-            model: (json["model"] as? String) ?? ""
+            model: (json["model"] as? String) ?? "",
+            resumed: !handle.isEmpty && (json["resumed"] as? Bool) == true
         )
     }
 

@@ -160,6 +160,9 @@ final class LiveSessionController: ObservableObject {
         case authorizing = "Getting a token from your Mac…"
         case connecting = "Connecting…"
         case ready = "Live"
+        /// The socket is being replaced under a conversation that is still
+        /// going. Not an error, and not a dead end.
+        case reconnecting = "Reconnecting…"
         case closed = "Closed"
     }
 
@@ -194,8 +197,43 @@ final class LiveSessionController: ObservableObject {
     private var client: LiveClient?
     private var pump: Task<Void, Never>?
     private var statusPoll: Task<Void, Never>?
+    /// The developer fallback's one-shot start. A paired session uses
+    /// `sessionLoop` instead.
     private var starter: Task<Void, Never>?
     private let audio = AudioEngine()
+
+    // MARK: Reconnect state
+    //
+    // A paired session outlives any one socket. The loop in
+    // `runLinkedSessionLoop` owns connecting, and `ReconnectPolicy` owns the
+    // decision of whether and when to connect again.
+
+    /// The whole paired session, across every socket it uses.
+    private var sessionLoop: Task<Void, Never>?
+    private var policy = ReconnectPolicy()
+    /// The newest resumable handle the server offered. Never logged, never
+    /// shown: it is a key to the conversation.
+    private var resumeHandle: String?
+    /// Set while we are deliberately dropping a socket to get ahead of the
+    /// server's own hang-up, so the loop does not treat it as a failure.
+    private var swapRequested = false
+    private var goAwayTimer: Task<Void, Never>?
+    private var sawSetupComplete = false
+    private var socketReady = false
+    private var micStarted = false
+    /// The last raw socket message. Held back while a reconnect is in play and
+    /// only promoted to the banner if reconnecting ultimately fails.
+    private var lastTransportError = ""
+
+    /// Mic audio captured while no socket is up. Bounded to ~1.5 s: enough to
+    /// carry a syllable across a sub-second swap, short enough that nothing
+    /// stale is ever replayed into the server's voice detection.
+    private var micBuffer: [Data] = []
+    private static let maxBufferedMicBytes = 16_000 * 2 * 3 / 2
+
+    /// Only a paired session can reconnect: a reconnect needs a new token, and
+    /// only the Mac can mint one.
+    private var reconnectsEnabled: Bool { pairedDesktop != nil }
     /// Present only in paired mode: the gate, the tool router, run polling
     /// and the contract's system events all live in here.
     private var coordinator: SessionCoordinator?
@@ -215,27 +253,206 @@ final class LiveSessionController: ObservableObject {
         pairedDesktop = paired
         status = .authorizing
         isRunning = true
-        starter = Task { [weak self] in
-            guard let self else { return }
+        policy = ReconnectPolicy()
+        resumeHandle = nil
+        sessionLoop = Task { [weak self] in
+            await self?.runLinkedSessionLoop(paired: paired, model: model)
+        }
+    }
+
+    /// One paired conversation, however many sockets it takes.
+    ///
+    /// Each pass mints a token, opens a connection, and pumps it until it
+    /// ends. What happens next is `ReconnectPolicy`'s call, made from what the
+    /// socket actually reported rather than from what closed it.
+    private func runLinkedSessionLoop(paired: PairedDesktop, model: String) async {
+        var connectionIndex = 0
+        var pendingDelay: TimeInterval = 0
+
+        while isRunning && !Task.isCancelled {
+            if pendingDelay > 0 {
+                status = .reconnecting
+                try? await Task.sleep(nanoseconds: UInt64(pendingDelay * 1_000_000_000))
+                pendingDelay = 0
+                guard isRunning, !Task.isCancelled else { return }
+            }
+
+            connectionIndex += 1
+            let reconnecting = connectionIndex > 1
+            status = reconnecting ? .reconnecting : .authorizing
+
+            // ---- a fresh single-use token, carrying the handle if we have one ----
+            let minted: LinkToken
             do {
-                let minted = try await LinkClient(paired: paired).geminiToken()
-                guard !Task.isCancelled else { return }
-                self.begin(
-                    credential: .ephemeralToken(minted.token),
-                    model: minted.model.isEmpty ? model : minted.model,
-                    voice: ""
-                )
-            } catch let error as LinkError {
-                self.isRunning = false
-                self.status = .idle
-                self.errorText = error.message
-                self.onLinkError?(error)
+                minted = try await LinkClient(paired: paired).geminiToken(resumeHandle: resumeHandle)
             } catch {
-                self.isRunning = false
-                self.status = .idle
-                self.errorText = "Could not get a session token from your Mac."
+                let linkError = error as? LinkError
+                // `not_paired` ends the session exactly as it always has: the
+                // credential is gone and no amount of retrying brings it back.
+                if linkError?.clearsPairing == true {
+                    finish(error: linkError?.message ?? "This phone is no longer paired.")
+                    linkError.map { onLinkError?($0) }
+                    return
+                }
+                guard reconnecting else {
+                    finish(error: linkError?.message ?? "Could not get a session token from your Mac.")
+                    if let linkError { onLinkError?(linkError) }
+                    return
+                }
+                // Mid-session the Mac being briefly unreachable is just
+                // another dropped connection; it gets the same backoff.
+                switch policy.decide(
+                    cause: .transportDropped(code: 0, reason: "token mint failed"),
+                    lived: 0
+                ) {
+                case .reconnect(let after, let dropHandle):
+                    if dropHandle { resumeHandle = nil }
+                    note("your Mac did not hand out a session token — trying again in \(Self.seconds(after))")
+                    pendingDelay = after
+                    continue
+                default:
+                    finish(error: ReconnectPolicy.giveUpMessage)
+                    return
+                }
+            }
+            guard isRunning, !Task.isCancelled else { return }
+
+            // The Mac is the only one that can put the handle in the token, so
+            // it is also the only one that can say whether the conversation is
+            // actually coming back. Never inferred from having asked.
+            let resumed = minted.resumed
+            if resumeHandle != nil && !resumed {
+                note("the previous conversation could not be restored — starting a fresh one")
+                resumeHandle = nil
+            }
+
+            let client = LiveClient(config: .init(
+                credential: .ephemeralToken(minted.token),
+                model: minted.model.isEmpty
+                    ? (model.isEmpty ? "models/gemini-3.1-flash-live-preview" : model)
+                    : minted.model,
+                minimalSetup: true
+            ))
+            self.client = client
+            policy.connectionOpened(resuming: resumed)
+
+            if let coordinator {
+                // Same conversation, new pipe: run tracking, the announcement
+                // queue and the acknowledged ledger all carry over.
+                await coordinator.reattach(transport: client, resumed: resumed)
+            } else {
+                let sink: @Sendable (CoordinatorEvent) -> Void = { [weak self] event in
+                    Task { @MainActor in self?.apply(coordinatorEvent: event) }
+                }
+                coordinator = SessionCoordinator(
+                    link: LinkClient(paired: paired),
+                    transport: client,
+                    userName: "the user",
+                    notify: sink
+                )
+                startStatusPolling()
+            }
+
+            // ---- pump this connection until it ends ----
+            status = .connecting
+            sawSetupComplete = false
+            socketReady = false
+            var closeCode = 0
+            var closeReason: String?
+            var refusal: (code: Int, reason: String?)?
+            let openedAt = Date()
+
+            let stream = await client.events()
+            await client.connect()
+            for await event in stream {
+                await apply(event)
+                switch event {
+                case .authorizationFailed(let code, let reason): refusal = (code, reason)
+                case .closed(let code, let reason): closeCode = code; closeReason = reason
+                default: break
+                }
+            }
+
+            goAwayTimer?.cancel()
+            goAwayTimer = nil
+            socketReady = false
+            let lived = Date().timeIntervalSince(openedAt)
+            guard isRunning, !Task.isCancelled else { return }
+
+            // We closed it ourselves, ahead of the server's deadline.
+            if swapRequested {
+                swapRequested = false
+                continue
+            }
+
+            let cause: LiveCloseCause = refusal.map {
+                .authorizationRefused(code: $0.code, reason: $0.reason)
+            } ?? ReconnectPolicy.classify(
+                code: closeCode,
+                reason: closeReason,
+                sawSetupComplete: sawSetupComplete,
+                lived: lived
+            )
+
+            switch policy.decide(cause: cause, lived: lived) {
+            case .stopIntentional:
+                finish(error: "")
+                return
+            case .stopAuthorizationFailed(let code, let reason):
+                finish(error: "Gemini refused this session's token (close \(code)"
+                    + (reason.map { ": \($0)" } ?? "")
+                    + "). Tap the orb to ask your Mac for a fresh one.")
+                return
+            case .giveUp(let message):
+                finish(error: message)
+                return
+            case .reconnect(let after, let dropHandle):
+                if dropHandle {
+                    note("Gemini would not take us back into that conversation — the next connection starts a fresh one")
+                    resumeHandle = nil
+                }
+                if case .credentialExpired = cause {
+                    note("the session token reached its 30-minute expiry — getting a new one")
+                }
+                await coordinator?.suspend()
+                status = .reconnecting
+                pendingDelay = after
             }
         }
+    }
+
+    private static func seconds(_ value: TimeInterval) -> String {
+        value < 1 ? "half a second" : "\(Int(value.rounded())) s"
+    }
+
+    /// A line for the debug log. Never the banner: while a reconnect is in
+    /// play the user sees "Reconnecting…" and nothing alarming.
+    private func note(_ line: String) {
+        toolLog.append(line)
+        if toolLog.count > 200 { toolLog.removeFirst(toolLog.count - 200) }
+    }
+
+    /// The session is over for good. This is the only place a transport
+    /// problem becomes something the user is shown.
+    private func finish(error: String) {
+        let message = error.isEmpty ? lastTransportError : error
+        if !message.isEmpty { errorText = message }
+        isRunning = false
+        status = .closed
+        goAwayTimer?.cancel()
+        goAwayTimer = nil
+        statusPoll?.cancel()
+        statusPoll = nil
+        audio.stop()
+        audioStatus = audio.currentStatus()
+        micStarted = false
+        micBuffer.removeAll()
+        socketReady = false
+        resumeHandle = nil
+        let coordinator = self.coordinator
+        self.coordinator = nil
+        Task { await coordinator?.close() }
+        client = nil
     }
 
     /// Developer fallback, unpaired only.
@@ -261,52 +478,35 @@ final class LiveSessionController: ObservableObject {
         pendingProposal = nil
         toolLog = []
         announcingRunId = nil
+        lastTransportError = ""
+        micBuffer.removeAll()
+        micStarted = false
+        socketReady = false
+        sawSetupComplete = false
+        swapRequested = false
     }
 
+    /// Developer fallback only. One socket, no reconnect: there is nothing to
+    /// mint a second token from, and a pasted key is not a paired session.
     private func begin(credential: LiveClient.Credential, model: String?, voice: String) {
         status = .connecting
         startStatusPolling()
 
+        let instruction = "You are a terse voice assistant. Answer in one or two short sentences unless asked for more."
         let config: LiveClient.Config
-        if let paired = pairedDesktop {
-            // Everything that decides who Iris is — voice, prompt, tools —
-            // is baked into the token by the Mac. The phone only opens the
-            // socket and answers the tool calls.
+        if let model, !model.isEmpty {
             config = .init(
                 credential: credential,
-                model: model?.isEmpty == false ? model! : "models/gemini-3.1-flash-live-preview",
-                minimalSetup: true
+                model: model,
+                voiceName: voice,
+                systemInstruction: instruction
             )
-            _ = paired
         } else {
-            let instruction = "You are a terse voice assistant. Answer in one or two short sentences unless asked for more."
-            if let model, !model.isEmpty {
-                config = .init(
-                    credential: credential,
-                    model: model,
-                    voiceName: voice,
-                    systemInstruction: instruction
-                )
-            } else {
-                config = .init(credential: credential, voiceName: voice, systemInstruction: instruction)
-            }
+            config = .init(credential: credential, voiceName: voice, systemInstruction: instruction)
         }
         let client = LiveClient(config: config)
         self.client = client
-
-        if let paired = pairedDesktop {
-            let sink: @Sendable (CoordinatorEvent) -> Void = { [weak self] event in
-                Task { @MainActor in self?.apply(coordinatorEvent: event) }
-            }
-            coordinator = SessionCoordinator(
-                link: LinkClient(paired: paired),
-                transport: client,
-                userName: "the user",
-                notify: sink
-            )
-        } else {
-            coordinator = nil
-        }
+        coordinator = nil
 
         pump = Task { [weak self] in
             guard let self else { return }
@@ -324,10 +524,18 @@ final class LiveSessionController: ObservableObject {
         isRunning = false
         starter?.cancel()
         starter = nil
+        goAwayTimer?.cancel()
+        goAwayTimer = nil
+        sessionLoop?.cancel()
+        sessionLoop = nil
         statusPoll?.cancel()
         statusPoll = nil
         audio.stop()
         audioStatus = audio.currentStatus()
+        micStarted = false
+        micBuffer.removeAll()
+        socketReady = false
+        resumeHandle = nil
         let coordinator = self.coordinator
         self.coordinator = nil
         Task { await coordinator?.close() }
@@ -335,8 +543,50 @@ final class LiveSessionController: ObservableObject {
         self.client = nil
         pump?.cancel()
         pump = nil
+        // Closing finishes the event stream, which is what lets the session
+        // loop above notice that `isRunning` is false and return.
         Task { await client?.close() }
         status = .closed
+    }
+
+    // MARK: Proactive reconnect
+
+    /// `goAway` is the server saying how long this socket has left. Rather
+    /// than wait to be hung up on mid-sentence, swap the connection while the
+    /// line is quiet — the conversation itself continues on the new one.
+    private func scheduleProactiveReconnect(timeLeft: TimeInterval?) {
+        guard reconnectsEnabled else { return }
+        goAwayTimer?.cancel()
+        let schedule = ReconnectPolicy.schedule(goAwayTimeLeft: timeLeft, now: Date())
+        goAwayTimer = Task { [weak self] in
+            let initial = schedule.delay(from: Date())
+            if initial > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(initial * 1_000_000_000))
+            }
+            // Don't cut anybody off. Wait for the turn to end — but only until
+            // the server's own deadline, because past that it closes the
+            // socket whether the sentence finished or not.
+            while !Task.isCancelled {
+                guard let self, self.isRunning, let coordinator = self.coordinator else { return }
+                let busy = await coordinator.isMidTurn()
+                guard ReconnectPolicy.shouldWaitForQuiet(
+                    busy: busy, now: Date(), hardDeadline: schedule.hardDeadline
+                ) else { break }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard !Task.isCancelled, let self, self.isRunning else { return }
+            await self.swapConnection()
+        }
+    }
+
+    private func swapConnection() async {
+        guard isRunning, let client else { return }
+        swapRequested = true
+        status = .reconnecting
+        note("rotating the connection ahead of the server's deadline")
+        await coordinator?.suspend()
+        // Finishes the event stream; the session loop opens the next socket.
+        await client.close()
     }
 
     private func apply(_ event: LiveEvent) async {
@@ -350,7 +600,13 @@ final class LiveSessionController: ObservableObject {
 
         case .setupComplete:
             status = .ready
-            await startMicrophone()
+            sawSetupComplete = true
+            socketReady = true
+            lastTransportError = ""
+            // The engine is started once and kept running across every
+            // reconnect: restarting it is what would make the swap audible.
+            await startMicrophoneIfNeeded()
+            flushBufferedMic()
 
         case .audio(let pcm):
             audioChunksReceived += 1
@@ -374,13 +630,24 @@ final class LiveSessionController: ObservableObject {
             break
 
         case .turnComplete:
+            // A completed turn proves this connection works, which is what
+            // refills the reconnect budget — same signal the desktop uses.
+            policy.connectionHealthy()
             lines.append(.init(speaker: "—", text: "[turn complete]"))
 
         case .goAway(let timeLeft):
-            errorText = "Server going away (\(timeLeft ?? "soon"))"
+            // NOT an error. The server rotates a Live connection on a fixed
+            // lifetime; this is the warning, and the answer is to reconnect,
+            // not to end the conversation.
+            let seconds = LiveDuration.seconds(timeLeft)
+            note("Gemini is rotating this connection (\(timeLeft ?? "soon")) — moving to a new one")
+            scheduleProactiveReconnect(timeLeft: seconds)
 
-        case .sessionResumption:
-            break
+        case .sessionResumption(let handle, let resumable):
+            // The only thing that can bring this conversation back. Kept in
+            // memory, never logged, never shown.
+            guard resumable, let handle, !handle.isEmpty else { break }
+            resumeHandle = handle
 
         case .toolCall(let calls):
             // Execution belongs to the coordinator; the UI only shows it.
@@ -391,15 +658,24 @@ final class LiveSessionController: ObservableObject {
 
         case .authorizationFailed(let code, let reason):
             // Not a network error and not something to retry: the token was
-            // refused. Say so, and stop.
-            errorText = "Gemini refused this session's token (close \(code)"
+            // refused. In a paired session the loop owns what that means, so
+            // nothing is put in front of the user from here.
+            let text = "Gemini refused this session's token (close \(code)"
                 + (reason.map { ": \($0)" } ?? "")
                 + "). Tap Start to ask your Mac for a fresh one."
+            if reconnectsEnabled { lastTransportError = text; note(text) } else { errorText = text }
 
         case .error(let message):
-            errorText = message
+            if reconnectsEnabled { lastTransportError = message; note(message) } else { errorText = message }
 
         case .closed(let code, let reason):
+            socketReady = false
+            guard !reconnectsEnabled else {
+                // The socket is finished; the session may not be. Whether to
+                // reconnect is the session loop's decision, not this one's.
+                note("connection closed (code \(code))" + (reason.map { ": \($0)" } ?? ""))
+                break
+            }
             status = .closed
             isRunning = false
             statusPoll?.cancel()
@@ -452,22 +728,50 @@ final class LiveSessionController: ObservableObject {
         }
     }
 
-    private func startMicrophone() async {
+    /// Started once per session and deliberately NOT restarted on a
+    /// reconnect: tearing the audio graph down and back up is what would turn
+    /// a socket swap into an audible gap.
+    private func startMicrophoneIfNeeded() async {
+        guard !micStarted else { return }
         let granted = await audio.requestMicrophonePermission()
         guard granted else {
             errorText = "Microphone permission denied."
             return
         }
+        micStarted = true
         audio.onError = { [weak self] message in
             Task { @MainActor in self?.errorText = message }
         }
         audio.onCapturedChunk = { [weak self] chunk in
-            Task { [weak self] in
-                guard let client = await self?.currentClient else { return }
-                await client.sendAudio(chunk)
-            }
+            Task { @MainActor in self?.sendOrBuffer(mic: chunk) }
         }
         audio.start()
+    }
+
+    /// Mic audio has nowhere to go between sockets. Rather than drop the
+    /// user's words outright, hold a bounded tail of them and deliver it once
+    /// the new session is up. The bound matters: replaying seconds of stale
+    /// audio would land as an utterance the user never made.
+    private func sendOrBuffer(mic chunk: Data) {
+        guard socketReady, let client else {
+            micBuffer.append(chunk)
+            var buffered = micBuffer.reduce(0) { $0 + $1.count }
+            while buffered > Self.maxBufferedMicBytes, !micBuffer.isEmpty {
+                buffered -= micBuffer.removeFirst().count
+            }
+            return
+        }
+        Task { await client.sendAudio(chunk) }
+    }
+
+    private func flushBufferedMic() {
+        guard let client, !micBuffer.isEmpty else { micBuffer.removeAll(); return }
+        let pending = micBuffer
+        micBuffer.removeAll()
+        note("carried \(pending.count) mic chunk(s) across the reconnect")
+        Task {
+            for chunk in pending { await client.sendAudio(chunk) }
+        }
     }
 
     /// The audio engine owns its own serial queue, so the UI samples it
@@ -483,8 +787,6 @@ final class LiveSessionController: ObservableObject {
             }
         }
     }
-
-    private var currentClient: LiveClient? { client }
 
     /// Appends to the trailing line when the same speaker keeps streaming —
     /// transcription arrives in small fragments.

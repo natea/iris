@@ -21,6 +21,9 @@ enum VoiceState: Equatable {
     case unavailable
     case idle
     case connecting
+    /// The socket is being replaced under a conversation that is still going.
+    /// Deliberately its own state and not an error: nothing has been lost yet.
+    case reconnecting
     case listening
     case speaking
     /// Hermes is running work for us.
@@ -32,7 +35,7 @@ enum VoiceState: Equatable {
         switch self {
         case .unavailable: return Color.gray
         case .idle: return Color(red: 0.45, green: 0.47, blue: 0.75)
-        case .connecting: return Color(red: 0.95, green: 0.72, blue: 0.30)
+        case .connecting, .reconnecting: return Color(red: 0.95, green: 0.72, blue: 0.30)
         case .listening: return Color(red: 0.32, green: 0.78, blue: 0.94)
         case .speaking: return Color(red: 0.66, green: 0.52, blue: 0.99)
         case .working: return Color(red: 0.98, green: 0.60, blue: 0.29)
@@ -45,6 +48,7 @@ enum VoiceState: Equatable {
         case .unavailable: return "link.badge.plus"
         case .idle: return "mic.fill"
         case .connecting: return "ellipsis"
+        case .reconnecting: return "arrow.triangle.2.circlepath"
         case .listening: return "waveform"
         case .speaking: return "waveform.badge.mic"
         case .working: return "gearshape.2.fill"
@@ -58,6 +62,7 @@ enum VoiceState: Equatable {
         case .unavailable: return "Not paired yet"
         case .idle: return "Tap to talk to Iris"
         case .connecting: return "Connecting…"
+        case .reconnecting: return "Reconnecting…"
         case .listening: return "Listening"
         case .speaking: return "Iris is speaking"
         case .working(let n): return n == 1
@@ -73,6 +78,7 @@ enum VoiceState: Equatable {
         case .unavailable: return "Unavailable, this phone is not paired"
         case .idle: return "Stopped"
         case .connecting: return "Connecting"
+        case .reconnecting: return "Reconnecting"
         case .listening: return "Listening to you"
         case .speaking: return "Iris is speaking"
         case .working(let n): return "Hermes is working on \(n) task\(n == 1 ? "" : "s")"
@@ -92,7 +98,7 @@ enum VoiceState: Equatable {
     var pulse: (scale: CGFloat, duration: Double)? {
         switch self {
         case .unavailable, .idle: return nil
-        case .connecting: return (1.06, 0.9)
+        case .connecting, .reconnecting: return (1.06, 0.9)
         case .listening: return (1.035, 2.2)
         case .speaking: return (1.075, 0.7)
         case .working: return (1.03, 1.6)
@@ -185,7 +191,7 @@ struct VoiceOrb: View {
         ScrollView {
             VStack(spacing: 28) {
                 ForEach(
-                    [VoiceState.idle, .connecting, .listening, .speaking, .working(2), .awaitingAnswer, .unavailable],
+                    [VoiceState.idle, .connecting, .reconnecting, .listening, .speaking, .working(2), .awaitingAnswer, .unavailable],
                     id: \.self
                 ) { state in
                     VStack(spacing: 8) {

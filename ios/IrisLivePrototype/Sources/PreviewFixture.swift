@@ -57,6 +57,10 @@ struct PreviewFixture {
         case "working":   return .working
         case "proposal":  return .proposal
         case "error":     return .errored
+        case "reconnecting": return .reconnecting
+        #if DEBUG
+        case "progress":  return .progress
+        #endif
         default:          return nil
         }
     }
@@ -71,6 +75,10 @@ struct PreviewFixture {
     ]
 
     static let listening = PreviewFixture(state: .listening, lines: conversation)
+
+    /// The socket is being swapped under a conversation that is still going.
+    /// No banner: the point of this state is that nothing has gone wrong yet.
+    static let reconnecting = PreviewFixture(state: .reconnecting, lines: conversation)
 
     static let speaking = PreviewFixture(
         state: .speaking,
@@ -106,6 +114,17 @@ struct PreviewFixture {
         pendingProposal: "Ask Hermes to re-run the dependency audit across the workspace and write up anything pinned more than two majors behind.",
         pairedName: "Nate's MacBook Pro"
     )
+
+    #if DEBUG
+    /// Runs that carry a §12 live-progress block, for the run-detail screen.
+    /// See RunProgressFixtures.swift — the whole thing is DEBUG-only.
+    static let progress = PreviewFixture(
+        state: .working(3),
+        lines: conversation,
+        runs: RunProgressFixtures.runs,
+        pairedName: "Nate's MacBook Pro"
+    )
+    #endif
 
     static let errored = PreviewFixture(
         state: .idle,

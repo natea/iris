@@ -36,8 +36,14 @@ enum ErrorPresentation {
         if text.hasPrefix("Gemini refused this session's token") {
             return "Your Mac's session token was refused. Tap the orb to ask for a fresh one."
         }
+        // "Server going away" no longer reaches the banner at all: a `goAway`
+        // is the server rotating the connection on its fixed lifetime, and
+        // the app now reconnects into the same conversation instead of
+        // telling the user their session is over. The mapping stays only for
+        // a session with no reconnect behind it (the unpaired developer
+        // fallback), and no longer claims the conversation is finished.
         if text.hasPrefix("Server going away") {
-            return "Gemini is ending this session. Tap the orb to start a new one."
+            return "Gemini is rotating this connection. Tap the orb to start again."
         }
         if text.hasPrefix("Unparsable frame") || text.hasPrefix("Failed to encode") {
             return "Iris and Gemini disagreed about a message. The details are in Settings → Debug."

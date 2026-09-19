@@ -211,6 +211,7 @@ struct MainView: View {
         switch voiceState {
         case .unavailable: return "Once this phone is paired, what you say and what Iris says will appear here."
         case .idle: return "What you say and what Iris says will appear here."
+        case .reconnecting: return "Reconnecting. Your conversation is being picked back up."
         default: return "Listening. Say something."
         }
     }
@@ -229,6 +230,10 @@ struct MainView: View {
         if let fixture { return fixture.state }
 
         if pairing.paired == nil && !hasDeveloperKey { return .unavailable }
+        // Reconnecting outranks the gate: the staged proposal is being
+        // invalidated anyway, and "Waiting for your answer" would be a lie
+        // while there is no connection to answer over.
+        if session.status == .reconnecting && session.isRunning { return .reconnecting }
         if session.pendingProposal != nil { return .awaitingAnswer }
 
         guard session.isRunning else { return .idle }
@@ -236,6 +241,8 @@ struct MainView: View {
         switch session.status {
         case .authorizing, .connecting:
             return .connecting
+        case .reconnecting:
+            return .reconnecting
         case .ready:
             if isSpeaking { return .speaking }
             if activeRunCount > 0 { return .working(activeRunCount) }

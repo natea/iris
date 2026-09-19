@@ -49,15 +49,30 @@ public actor SessionCoordinator {
     public static let minAudibleReadbackChars = 48
 
     private let link: LinkTaskService
-    private let transport: LiveTransport
+    /// Swapped, not replaced, on a reconnect: the coordinator outlives any one
+    /// socket so run tracking, the announcement queue and the acknowledged
+    /// ledger carry over.
+    private var transport: LiveTransport
     private let router: ToolRouter
     private let notify: @Sendable (CoordinatorEvent) -> Void
 
     private var userName: String
-    private let sessionId: String
+    private var sessionId: String
     /// A resumed session keeps its conversation, so it must not be greeted
     /// again (LINK_API.md §7.1).
     private let isResumedSession: Bool
+
+    // MARK: Connection identity
+    //
+    // One coordinator, many sockets. Everything that can outlive a socket —
+    // a tool call in flight, a queued announcement — is tagged with the
+    // connection it belongs to, so a dead socket's work can never be
+    // delivered on a live one.
+
+    /// Bumped by every `setupComplete`. Connection 1 is the original session.
+    private var connectionEpoch = 0
+    /// Whether the connection now open continued the previous conversation.
+    private var connectionResumed = false
 
     // Turn bookkeeping
     private var modelTranscriptChars = 0
@@ -67,8 +82,13 @@ public actor SessionCoordinator {
     private var sessionStartInjected = false
 
     // Announcements
-    private var announcementQueue: [(runId: String, text: String, status: String)] = []
-    private var pendingAnnouncement: String?
+    typealias Announcement = (runId: String, text: String, status: String)
+    private var announcementQueue: [Announcement] = []
+    /// The announcement currently being spoken. Held whole rather than by id
+    /// so a connection reset can put it back at the front of the queue —
+    /// LINK_API.md §8 step 4: an interrupted announcement is retried, never
+    /// acknowledged.
+    private var inFlightAnnouncement: Announcement?
     private var announcedRuns: Set<String> = []
 
     // Run tracking
@@ -109,10 +129,66 @@ public actor SessionCoordinator {
 
     // MARK: Lifecycle
 
-    /// Called once `setupComplete` arrives. Everything here is best-effort:
-    /// a failure must degrade the session, never end it.
+    /// Points the coordinator at a new socket after a reconnect, WITHOUT
+    /// losing what the conversation has accumulated.
+    ///
+    /// `resumed` is the desktop's answer about the resumption handle, not a
+    /// guess: true only when the Mac minted a token that carried it.
+    public func reattach(transport: LiveTransport, resumed: Bool) {
+        self.transport = transport
+        connectionResumed = resumed
+        closed = false
+        // Nothing from the dead socket is still in flight, whatever the last
+        // frame on it claimed.
+        modelTurnActive = false
+        modelTranscriptChars = 0
+        userTranscriptBuffer = ""
+        for task in toolTasks { task.cancel() }
+        toolTasks.removeAll()
+        // §8 step 4: an announcement the reset cut off was never delivered, so
+        // it goes back to the front of the queue instead of being acknowledged.
+        if let announcement = inFlightAnnouncement {
+            inFlightAnnouncement = nil
+            announcementQueue.insert(announcement, at: 0)
+            notify(.log("announcement for \(announcement.runId) was cut off by the reset — it will be retried"))
+        }
+    }
+
+    /// Called once `setupComplete` arrives — on the first connection and on
+    /// every reconnect.
+    ///
+    /// Everything here is best-effort: a failure must degrade the session,
+    /// never end it.
     public func sessionReady() async {
+        connectionEpoch += 1
+        let isReconnect = connectionEpoch > 1
+
+        // WHAT HAPPENS TO THE DISPATCH GATE ACROSS A RECONNECT
+        //
+        // The staged proposal does NOT survive, on a resumed session either.
+        // A resumed session restores the MODEL's view of the conversation; it
+        // restores nothing about what this phone observed. The gate's whole
+        // job is to prove an ordering — the complete brief was read back, and
+        // then the user answered in a turn of their own — and a socket that
+        // died somewhere inside that sequence leaves it unprovable. The
+        // failure mode of guessing is the one failure this app must never
+        // have: a reconnect turning an unconfirmed proposal into a confirmed
+        // one. So it is invalidated and Iris has to stage and re-read it.
+        //
+        // The model is told this in the contract's own words. On a resumed
+        // session the stale proposal_id now matches nothing, so a submit is
+        // rejected with `no_proposal` ("Stage and read back a complete brief
+        // first"). On a fresh session the session id is rotated too, so it is
+        // rejected with `session_mismatch` ("Stage and confirm the brief
+        // again"). Either way the model re-reads the brief and waits for a
+        // real answer.
+        if isReconnect && !connectionResumed { sessionId = UUID().uuidString }
         await router.resetSession(sessionId: sessionId)
+        if isReconnect {
+            notify(.pendingProposal(nil))
+            notify(.log("reconnected (\(connectionResumed ? "same conversation" : "new conversation")) — any staged proposal was invalidated"))
+        }
+
         let coordinator = self
         await router.setOnDispatch { result, task in
             Task { await coordinator.track(runId: result.runId, note: task) }
@@ -125,8 +201,15 @@ public actor SessionCoordinator {
             }
         }
 
-        await injectSessionStart()
+        if isReconnect {
+            // Do NOT re-greet a conversation that is still going. Say
+            // something only when the thread was actually lost.
+            if !connectionResumed { await injectFreshSessionNotice() }
+        } else {
+            await injectSessionStart()
+        }
         await refreshRuns()
+        // §8 step 1 names reconnect explicitly: ask again every time.
         await loadUndelivered()
         startPolling()
     }
@@ -139,15 +222,30 @@ public actor SessionCoordinator {
         await transport.sendTextTurn(SystemEvent.sessionStart(userName: userName), turnComplete: true)
     }
 
-    public func close() {
+    /// The spec's "start a fresh session AND say so". Uses §7.1's mechanism —
+    /// a client text turn the model already knows how to handle — so the
+    /// notice arrives in Iris's own voice rather than as a silent context loss.
+    private func injectFreshSessionNotice() async {
+        modelTurnActive = true
+        notify(.log("→ SYSTEM_EVENT_SESSION_START (conversation could not be restored)"))
+        await transport.sendTextTurn(SystemEvent.sessionRestarted(userName: userName), turnComplete: true)
+    }
+
+    /// The socket died but the session has not. Stops everything bound to the
+    /// dead connection and keeps everything bound to the conversation.
+    public func suspend() {
         closed = true
         pollTask?.cancel()
         pollTask = nil
         for task in toolTasks { task.cancel() }
         toolTasks.removeAll()
+    }
+
+    public func close() {
+        suspend()
         // A pending announcement is deliberately NOT acknowledged: the desktop
         // will offer it again as undelivered on the next session.
-        pendingAnnouncement = nil
+        inFlightAnnouncement = nil
     }
 
     // MARK: Live events
@@ -210,9 +308,11 @@ public actor SessionCoordinator {
 
         case .toolCall(let calls):
             // Never on the audio path: a tool call that takes seconds must not
-            // stall playback or capture.
+            // stall playback or capture. Tagged with the connection that asked
+            // for it — a result cannot be answered onto a different socket.
             let coordinator = self
-            let task = Task.detached { await coordinator.run(calls: calls) }
+            let epoch = connectionEpoch
+            let task = Task.detached { await coordinator.run(calls: calls, epoch: epoch) }
             toolTasks.append(task)
 
         case .toolCallCancellation(let ids):
@@ -220,7 +320,9 @@ public actor SessionCoordinator {
             notify(.log("tool calls cancelled: \(ids.count)"))
 
         case .closed, .authorizationFailed:
-            close()
+            // Only the socket is finished. Whether the session is finished is
+            // the reconnect manager's call, so this stops short of close().
+            suspend()
 
         default:
             break
@@ -236,12 +338,12 @@ public actor SessionCoordinator {
         }
 
         // LINK_API.md §8 step 3/4: acknowledge ONLY a completed announcement.
-        if let runId = pendingAnnouncement {
-            pendingAnnouncement = nil
+        if let announcement = inFlightAnnouncement {
+            inFlightAnnouncement = nil
             if interrupted {
-                notify(.log("announcement for \(runId) was interrupted — not acknowledged"))
+                notify(.log("announcement for \(announcement.runId) was interrupted — not acknowledged"))
             } else {
-                await acknowledge(runId: runId)
+                await acknowledge(runId: announcement.runId)
             }
         }
 
@@ -252,13 +354,23 @@ public actor SessionCoordinator {
         await drainAnnouncements()
     }
 
+    /// True while cutting the socket would talk over somebody: Iris is
+    /// mid-turn, an announcement is being delivered, or the user is partway
+    /// through an utterance the server has not closed off yet. The proactive
+    /// `goAway` reconnect waits on this, up to the server's own deadline.
+    public func isMidTurn() -> Bool {
+        modelTurnActive
+            || inFlightAnnouncement != nil
+            || !userTranscriptBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func publishPendingProposal() async {
         notify(.pendingProposal(await router.pendingProposal()?.task))
     }
 
     // MARK: Tool calls
 
-    private func run(calls: [LiveToolCall]) async {
+    private func run(calls: [LiveToolCall], epoch: Int) async {
         var responses: [LiveFunctionResponse] = []
         for call in calls {
             guard let response = await router.handle(call) else {
@@ -270,6 +382,13 @@ public actor SessionCoordinator {
         }
         await publishPendingProposal()
         guard !responses.isEmpty, !closed else { return }
+        // The socket that asked is gone. Its call ids mean nothing to the new
+        // connection, and the model there is not waiting for them, so these
+        // results are dropped rather than answered onto the wrong session.
+        guard epoch == connectionEpoch else {
+            notify(.log("dropped \(responses.count) tool result(s) belonging to a closed connection"))
+            return
+        }
         await transport.sendToolResponses(responses)
     }
 
@@ -384,7 +503,7 @@ public actor SessionCoordinator {
         guard !announcedRuns.contains(runId) else { return }
         // Being spoken right now: the periodic undelivered check still lists it
         // until the turn completes, and it must not be queued a second time.
-        guard pendingAnnouncement != runId else { return }
+        guard inFlightAnnouncement?.runId != runId else { return }
         guard !announcementQueue.contains(where: { $0.runId == runId }) else { return }
         // The result is fetched before the turn is injected: the model must
         // never be asked to summarize something the phone has not read.
@@ -413,10 +532,10 @@ public actor SessionCoordinator {
     }
 
     private func drainAnnouncements() async {
-        guard !closed, pendingAnnouncement == nil, !modelTurnActive else { return }
+        guard !closed, inFlightAnnouncement == nil, !modelTurnActive else { return }
         guard !announcementQueue.isEmpty else { return }
         let next = announcementQueue.removeFirst()
-        pendingAnnouncement = next.runId
+        inFlightAnnouncement = next
         modelTurnActive = true
         notify(.announcing(runId: next.runId, status: next.status))
         notify(.log("→ SYSTEM_EVENT_HERMES_COMPLETE \(next.runId) (\(next.status))"))

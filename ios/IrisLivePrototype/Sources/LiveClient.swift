@@ -49,9 +49,13 @@ public enum LiveEvent: Sendable {
     case toolCallCancellation([String])
     /// Turn boundary.
     case turnComplete
-    /// Server intends to close the connection soon.
+    /// Server intends to close the connection soon. The payload is the raw
+    /// `goAway.timeLeft` — a protobuf Duration such as "9.5s". Parse it with
+    /// `LiveDuration.seconds(_:)`; the deadline is real and short.
     case goAway(String?)
-    /// Session resumption handle update (not used by the prototype, surfaced anyway).
+    /// `sessionResumptionUpdate` — the server's offer of a handle that
+    /// reconnects into THIS conversation. Keep the newest one where
+    /// `resumable` is true; it is the only thing that survives a reset.
     case sessionResumption(handle: String?, resumable: Bool)
     /// Non-fatal or fatal error text.
     case error(String)
@@ -177,6 +181,27 @@ public actor LiveClient: LiveTransport {
         /// minimum needed to open the session and relies on none of it
         /// (LINK_API.md §3).
         public var minimalSetup: Bool
+        /// Reconnect into an existing conversation instead of starting a new
+        /// one.
+        ///
+        /// **This only works on the API-key path.** Verified against the real
+        /// API on 2026-09-19 (probe output in the task report):
+        ///
+        ///   - API key + `setup.sessionResumption.handle` → the conversation
+        ///     came back; the model recalled a fact from before the drop.
+        ///   - ephemeral token + `setup.sessionResumption.handle` → the socket
+        ///     opened normally and the handle was **silently ignored**; the
+        ///     model behaved exactly like the control with no handle at all,
+        ///     and exactly like a deliberately corrupted handle. That is the
+        ///     documented "the token's config REPLACES the setup frame" rule
+        ///     applying to `sessionResumption` like everything else.
+        ///   - a token minted with `sessionResumption: {handle: …}` inside its
+        ///     `liveConnectConstraints.config` → the conversation came back.
+        ///
+        /// So a paired phone cannot resume by itself: the Mac has to mint a
+        /// token that already carries the handle. `LinkClient.geminiToken`
+        /// asks it to, and `LinkToken.resumed` says whether it did.
+        public var resumeHandle: String?
 
         public init(
             credential: Credential,
@@ -184,7 +209,8 @@ public actor LiveClient: LiveTransport {
             voiceName: String = "Iapetus",
             systemInstruction: String? = nil,
             enableTranscription: Bool = true,
-            minimalSetup: Bool = false
+            minimalSetup: Bool = false,
+            resumeHandle: String? = nil
         ) {
             self.credential = credential
             self.model = model
@@ -192,6 +218,7 @@ public actor LiveClient: LiveTransport {
             self.systemInstruction = systemInstruction
             self.enableTranscription = enableTranscription
             self.minimalSetup = minimalSetup
+            self.resumeHandle = resumeHandle
         }
 
         public init(
@@ -207,7 +234,8 @@ public actor LiveClient: LiveTransport {
                 voiceName: voiceName,
                 systemInstruction: systemInstruction,
                 enableTranscription: enableTranscription,
-                minimalSetup: false
+                minimalSetup: false,
+                resumeHandle: nil
             )
         }
     }
@@ -323,7 +351,9 @@ public actor LiveClient: LiveTransport {
         if config.minimalSetup {
             // Everything else is supplied by the token and silently ignored
             // here; sending it anyway would only invite the illusion that the
-            // phone controls it.
+            // phone controls it. `sessionResumption` is part of "everything
+            // else" — measured, not assumed (see Config.resumeHandle) — so the
+            // handle is deliberately NOT sent on this path.
             await sendJSON(["setup": ["model": config.model]])
             return
         }
@@ -348,6 +378,13 @@ public actor LiveClient: LiveTransport {
         }
         if let instruction = config.systemInstruction, !instruction.isEmpty {
             setup["systemInstruction"] = ["parts": [["text": instruction]]]
+        }
+        // Honored on this endpoint. An empty object still asks the server to
+        // issue handles, which is what makes the NEXT reconnect possible.
+        if let handle = config.resumeHandle, !handle.isEmpty {
+            setup["sessionResumption"] = ["handle": handle]
+        } else {
+            setup["sessionResumption"] = [String: Any]()
         }
         await sendJSON(["setup": setup])
     }
@@ -443,12 +480,21 @@ public actor LiveClient: LiveTransport {
         continuation = nil
     }
 
-    /// 1011 at any point, or *any* server close before the session ever became
-    /// usable, is the shape a refused token takes on this API.
+    /// A refused token is a server close before the session was ever usable.
+    ///
+    /// 1011 is NOT sufficient on its own, which is the correction this build
+    /// carries. Measured against the real API: a spent token is refused with
+    /// 1011 "Token has been used too many times" before `setupComplete` — but
+    /// a perfectly healthy session is ALSO closed with 1011, reason "auth
+    /// token has expired", at the exact moment the token's `expireTime`
+    /// passes. Every 30-minute paired session ends that way. Calling that an
+    /// authorization failure is what made a working conversation die on the
+    /// half hour instead of reconnecting on a fresh token.
     private func isAuthorizationClose(code: Int, elapsed: TimeInterval) -> Bool {
-        if code == 1011 { return true }
-        if !sawSetupComplete && elapsed <= Self.authorizationCloseWindow { return true }
-        return false
+        if code == 1011 {
+            return !sawSetupComplete || elapsed <= Self.authorizationCloseWindow
+        }
+        return !sawSetupComplete && elapsed <= Self.authorizationCloseWindow
     }
 
     private func handle(_ message: URLSessionWebSocketTask.Message) {

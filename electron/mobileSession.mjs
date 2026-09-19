@@ -111,10 +111,12 @@ export function buildMobileLiveConfig({
   accentReminder = "",
   contextParts = [],
   declarations = HERMES_FUNCTION_DECLARATIONS,
+  resumeHandle = "",
 } = {}) {
   const extraParts = Array.isArray(contextParts)
     ? contextParts.filter((part) => part && typeof part.text === "string" && part.text.trim())
     : [];
+  const handle = String(resumeHandle || "").trim();
   return {
     responseModalities: ["AUDIO"],
     speechConfig: {
@@ -124,7 +126,23 @@ export function buildMobileLiveConfig({
     },
     // Lets the phone reconnect into the SAME conversation after a drop, a
     // backgrounding, or a token refresh.
-    sessionResumption: {},
+    //
+    // The handle has to be baked in HERE and cannot be presented by the phone
+    // itself. Measured against the real API on 2026-09-19, on the constrained
+    // endpoint an ephemeral token uses:
+    //   - client sends setup.sessionResumption.handle -> silently ignored; the
+    //     model behaved exactly like a session with no handle, and exactly
+    //     like one given a deliberately corrupted handle. That is the same
+    //     "the token's config REPLACES the setup frame" rule that already
+    //     applies to the voice, the prompt and the tools.
+    //   - token minted with sessionResumption.handle inside this config ->
+    //     the conversation came back; the model recalled a fact from before
+    //     the drop.
+    // A handle stays valid across tokens, and outlives the token it was
+    // issued under (also verified). But a token is single-use: reconnecting
+    // with an already-spent one is refused with 1011 "Token has been used too
+    // many times", so every resume needs a freshly minted token.
+    sessionResumption: handle ? { handle } : {},
     inputAudioTranscription: {},
     outputAudioTranscription: {},
     tools: [

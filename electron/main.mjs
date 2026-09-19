@@ -3932,7 +3932,7 @@ const pushNotifier = createPushNotifier({
 // `purpose` selects between a real session config and a minimal preview
 // config (see buildMobilePreviewConfig in mobileSession.mjs): the two must
 // never share a token, since a preview has no tools and no personal context.
-async function mintGeminiToken({ voice: requestedVoice, purpose = "session" } = {}) {
+async function mintGeminiToken({ voice: requestedVoice, purpose = "session", resumeHandle } = {}) {
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
   if (!apiKey) throw new Error("No Gemini API key is configured.");
 
@@ -3952,6 +3952,8 @@ async function mintGeminiToken({ voice: requestedVoice, purpose = "session" } = 
   const liveConfig = isPreview
     ? buildMobilePreviewConfig({ voice, accent: process.env.GEMINI_LIVE_ACCENT })
     : buildMobileLiveConfig({
+        // Only a token can carry a resumption handle for a paired phone.
+        resumeHandle: resumeHandle || undefined,
         userName: userDisplayName(),
         voice,
         accentInstruction: accentInstruction(process.env.GEMINI_LIVE_ACCENT),
@@ -3984,7 +3986,10 @@ async function mintGeminiToken({ voice: requestedVoice, purpose = "session" } = 
     },
   });
   if (!token?.name) throw new Error("Gemini returned no token name.");
-  return { token: token.name, expiresAt, newSessionExpiresAt, model, voice, purpose };
+  return {
+    token: token.name, expiresAt, newSessionExpiresAt, model, voice, purpose,
+    resumed: Boolean(resumeHandle) && !isPreview,
+  };
 }
 
 // One shape for every task the phone sees, in the snake_case the rest of the

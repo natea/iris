@@ -327,7 +327,7 @@ test("the token route accepts a requested voice and echoes what the minter used"
   // The route passes the requested voice through verbatim; case-insensitive
   // normalization to the canonical catalogue name is the injected minter's
   // job (mirrors main.mjs's normalizeVoiceName), not this file's.
-  assert.deepEqual(calls, [{ voice: "Algenib", purpose: "session" }]);
+  assert.deepEqual(calls, [{ voice: "Algenib", purpose: "session", resumeHandle: undefined }]);
 });
 
 test("a lowercase voice name is passed through unmangled for the minter to normalize", async (t) => {
@@ -398,7 +398,7 @@ test("purpose:preview is minted with a short-lived token and echoed back", async
   assert.equal(response.status, 200);
   const minted = await response.json();
   assert.equal(minted.purpose, "preview");
-  assert.deepEqual(calls, [{ voice: undefined, purpose: "preview" }]);
+  assert.deepEqual(calls, [{ voice: undefined, purpose: "preview", resumeHandle: undefined }]);
 });
 
 test("an unknown purpose is refused before the minter is ever called", async (t) => {
@@ -1327,4 +1327,57 @@ test("live progress is never served to an unpaired caller", async (t) => {
     assert.equal(result.status, 401, path);
     assert.deepEqual(result.body, { error: "not_paired" });
   }
+});
+
+test("a resume handle reaches the minter, and `resumed` reports only what the token carries", async (t) => {
+  const seen = [];
+  const link = await startLink({
+    mintGeminiToken: async (options) => {
+      seen.push(options);
+      return { token: "auth_tokens/t", resumed: Boolean(options.resumeHandle) };
+    },
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+  const post = (payload) =>
+    fetch(`${link.origin}/link/gemini-token`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+  const fresh = await (await post({})).json();
+  assert.equal(fresh.resumed, false);
+  assert.equal(seen[0].resumeHandle, undefined);
+
+  const resumed = await (await post({ resume_handle: "handle-abc" })).json();
+  assert.equal(resumed.resumed, true);
+  assert.equal(seen[1].resumeHandle, "handle-abc");
+});
+
+test("a malformed resume handle is refused before the minter is called", async (t) => {
+  let calls = 0;
+  const link = await startLink({
+    mintGeminiToken: async () => {
+      calls += 1;
+      return { token: "auth_tokens/t" };
+    },
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+  for (const payload of [
+    { resume_handle: "" },
+    { resume_handle: "x".repeat(2049) },
+    { resume_handle: `bad${String.fromCharCode(0)}handle` },
+    { resume_handle: "h", purpose: "preview" },
+  ]) {
+    const response = await fetch(`${link.origin}/link/gemini-token`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${body.credential}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 400, JSON.stringify(payload).slice(0, 40));
+    assert.deepEqual(await response.json(), { error: "invalid_resume_handle" });
+  }
+  assert.equal(calls, 0);
 });

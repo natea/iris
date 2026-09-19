@@ -66,6 +66,18 @@ public enum SystemEvent {
         "SYSTEM_EVENT_SESSION_START: Greet \(userName) once in one short sentence, then ask what they have in mind. Do not report service status unless asked."
     }
 
+    /// The connection came back but the conversation could not.
+    ///
+    /// The spec is explicit that this must never be silent: "start a fresh
+    /// session AND SAY SO — never silently lose context". It rides §7.1's
+    /// mechanism and keeps the `SYSTEM_EVENT_SESSION_START` prefix, because
+    /// that is the one the baked-in system instruction knows how to act on.
+    /// The rest of the line redirects it away from a first-time greeting —
+    /// the user has been talking to Iris for ten minutes and would notice.
+    public static func sessionRestarted(userName: String) -> String {
+        "SYSTEM_EVENT_SESSION_START: The connection dropped and the previous conversation could NOT be restored, so this is a new session and you no longer have any of that history. In one short sentence, tell \(userName) the connection dropped and you have lost the thread of what you were discussing, then ask them to remind you where you were. Do not greet \(userName) as if they had just arrived, do not apologize at length, and do not report service status."
+    }
+
     /// `\n`-joined, exactly as `formatHermesCompletionEvent` in
     /// electron/hermesEvents.mjs builds it.
     public static func hermesComplete(

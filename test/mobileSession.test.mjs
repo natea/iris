@@ -135,6 +135,28 @@ test("voice, resumption, and transcription are baked in, and context is appended
   assert.equal(config.systemInstruction.parts[1].text, "USER CONTEXT — lives in Boston.");
 });
 
+test("a resume handle is baked into the token's config, because the phone cannot present one", () => {
+  // Measured against the real API: on the constrained endpoint a handle the
+  // phone puts in its own setup frame is silently ignored — the token's config
+  // replaces it, exactly as it replaces the voice and the prompt. Baking it in
+  // here is the ONLY thing that reconnects into the same conversation.
+  const resumed = buildMobileLiveConfig({ userName: "Nate", resumeHandle: "handle-abc" });
+  assert.deepEqual(resumed.sessionResumption, { handle: "handle-abc" });
+  // Everything else is untouched: a resumed session is the same Iris.
+  const fresh = buildMobileLiveConfig({ userName: "Nate" });
+  assert.deepEqual(
+    { ...resumed, sessionResumption: null },
+    { ...fresh, sessionResumption: null },
+  );
+});
+
+test("a blank resume handle asks for a fresh conversation rather than a broken one", () => {
+  for (const value of ["", "   ", null, undefined]) {
+    const config = buildMobileLiveConfig({ userName: "Nate", resumeHandle: value });
+    assert.deepEqual(config.sessionResumption, {});
+  }
+});
+
 test("a missing user name degrades to a neutral one rather than 'undefined'", () => {
   const text = buildMobileSystemInstructionText({});
   assert.equal(text.includes("undefined"), false);

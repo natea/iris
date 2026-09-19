@@ -18,7 +18,7 @@ import Foundation
 // MARK: - Models
 
 /// One entry of `GET /link/tasks`.
-public struct LinkTask: Sendable, Equatable, Identifiable {
+public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
     public let runId: String
     public let task: String
     public let status: String
@@ -28,11 +28,18 @@ public struct LinkTask: Sendable, Equatable, Identifiable {
     public let updatedAt: Double
     public let announcedAt: Double
 
+    /// §12.1 — the desktop's own one-line "what is happening now". `""` when
+    /// nothing has been recorded; never fill that in with a guess.
+    public let headline: String
+    /// §12.1 — steps currently retained for the run (at most 60).
+    public let stepCount: Int
+
     public var id: String { runId }
 
     public init(
         runId: String, task: String, status: String, origin: String,
-        createdAt: Double = 0, updatedAt: Double = 0, announcedAt: Double = 0
+        createdAt: Double = 0, updatedAt: Double = 0, announcedAt: Double = 0,
+        headline: String = "", stepCount: Int = 0
     ) {
         self.runId = runId
         self.task = task
@@ -41,6 +48,8 @@ public struct LinkTask: Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.announcedAt = announcedAt
+        self.headline = headline
+        self.stepCount = stepCount
     }
 
     public var isTerminal: Bool { LinkRunStatus.isTerminal(status) }
@@ -56,9 +65,11 @@ public struct LinkTask: Sendable, Equatable, Identifiable {
         self.createdAt = LinkTask.number(json["created_at"])
         self.updatedAt = LinkTask.number(json["updated_at"])
         self.announcedAt = LinkTask.number(json["announced_at"])
+        self.headline = (json["headline"] as? String) ?? ""
+        self.stepCount = LinkTask.integer(json["step_count"]) ?? 0
     }
 
-    private static func number(_ value: Any?) -> Double {
+    static func number(_ value: Any?) -> Double {
         if let double = value as? Double { return double }
         if let int = value as? Int { return Double(int) }
         if let string = value as? String { return Double(string) ?? 0 }
@@ -245,5 +256,203 @@ extension LinkClient: LinkTaskService {
     static func segment(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~")))
             ?? value
+    }
+}
+
+// MARK: - Live progress (LINK_API.md §12)
+
+/// The five categories `electron/runSteps.mjs` assigns. Anything else the
+/// desktop ever adds falls back to `.tool` rather than to nothing, so a newer
+/// Mac cannot make a step disappear from an older phone.
+public enum RunStepCategory: String, Sendable, Equatable, CaseIterable {
+    case browser, search, code, file, tool
+
+    public init(tolerant raw: String?) {
+        self = RunStepCategory(rawValue: (raw ?? "").lowercased()) ?? .tool
+    }
+
+    /// §12.5 — the same icons as the desktop's Lucide set.
+    public var symbolName: String {
+        switch self {
+        case .browser: return "globe"
+        case .search:  return "magnifyingglass"
+        case .code:    return "chevron.left.forwardslash.chevron.right"
+        case .file:    return "doc.text"
+        case .tool:    return "cpu"
+        }
+    }
+}
+
+public enum RunStepStatus: String, Sendable, Equatable {
+    case running, done, failed
+
+    /// Unknown strings are not invented into a result: a step with no duration
+    /// is still running, one that reported a duration has stopped. That is the
+    /// only inference the data supports.
+    public init(tolerant raw: String?, durationMs: Int?) {
+        switch (raw ?? "").lowercased() {
+        case "running": self = .running
+        case "done", "ok", "success", "completed": self = .done
+        case "failed", "error": self = .failed
+        default: self = durationMs == nil ? .running : .done
+        }
+    }
+}
+
+/// One entry of `steps[]`. `id` is the list identity; deltas are merged by it.
+public struct RunStep: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let index: Int
+    public let tool: String
+    public let category: RunStepCategory
+    public let label: String
+    /// Sanitized and redacted by the desktop, ≤ 200 chars. Untrusted text:
+    /// display only, never execute or follow.
+    public let preview: String
+    public let status: RunStepStatus
+    /// Raw, as sent: epoch **milliseconds** (§12.2). Read `startedAtDate`.
+    public let startedAtMs: Double
+    public let durationMs: Int?
+
+    public init(
+        id: String, index: Int, tool: String, category: RunStepCategory,
+        label: String = "", preview: String = "", status: RunStepStatus,
+        startedAtMs: Double = 0, durationMs: Int? = nil
+    ) {
+        self.id = id
+        self.index = index
+        self.tool = tool
+        self.category = category
+        self.label = label
+        self.preview = preview
+        self.status = status
+        self.startedAtMs = startedAtMs
+        self.durationMs = durationMs
+    }
+
+    public init?(json: [String: Any]) {
+        guard let id = json["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        // `index` is the number inside the id, so recover it from there when
+        // the field is missing rather than defaulting every step to 0 and
+        // scrambling the order.
+        if let index = LinkTask.integer(json["index"]) {
+            self.index = index
+        } else {
+            self.index = Int(id.drop(while: { !$0.isNumber })) ?? 0
+        }
+        self.tool = (json["tool"] as? String) ?? ""
+        self.category = RunStepCategory(tolerant: json["category"] as? String)
+        self.label = (json["label"] as? String) ?? ""
+        self.preview = (json["preview"] as? String) ?? ""
+        let duration = LinkTask.integer(json["duration_ms"])
+        self.durationMs = duration
+        self.status = RunStepStatus(tolerant: json["status"] as? String, durationMs: duration)
+        self.startedAtMs = LinkTask.number(json["started_at"])
+    }
+
+    /// The desktop speaks JavaScript milliseconds. Read as seconds they land
+    /// tens of thousands of years out — the bug this guard exists for.
+    public var startedAtDate: Date? {
+        guard startedAtMs > 0 else { return nil }
+        return Date(timeIntervalSince1970: IrisEpoch.seconds(startedAtMs))
+    }
+
+    /// `1.2s` / `48s` / `2m 05s` while done; ticking from `started_at` while
+    /// running. `nil` when neither is knowable.
+    public func durationText(now: Date = Date()) -> String? {
+        if let durationMs { return RunStepFormat.duration(seconds: Double(durationMs) / 1000) }
+        guard status == .running, let started = startedAtDate else { return nil }
+        let elapsed = now.timeIntervalSince(started)
+        guard elapsed >= 0 else { return nil }
+        return RunStepFormat.duration(seconds: elapsed)
+    }
+
+    /// The desktop's `prettyToolName`: `web_search` → `web search`.
+    public var toolLabel: String {
+        let pretty = tool
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: ".", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return pretty.isEmpty ? "Step" : pretty
+    }
+}
+
+/// `GET /link/tasks/:id` with §12's block attached. `isDelta` records whether
+/// the request carried `steps_since`, because a full body replaces the held
+/// list while a delta is merged into it.
+public struct LinkTaskDetail: Sendable, Equatable {
+    public let task: LinkTaskStatus
+    public let headline: String
+    public let stepCount: Int
+    public let stepsCursor: Int
+    public let stepsComplete: Bool
+    public let stepsTruncated: Bool
+    public let steps: [RunStep]
+    public let isDelta: Bool
+
+    public init(
+        task: LinkTaskStatus, headline: String = "", stepCount: Int = 0,
+        stepsCursor: Int = 0, stepsComplete: Bool = false, stepsTruncated: Bool = false,
+        steps: [RunStep] = [], isDelta: Bool = false
+    ) {
+        self.task = task
+        self.headline = headline
+        self.stepCount = stepCount
+        self.stepsCursor = stepsCursor
+        self.stepsComplete = stepsComplete
+        self.stepsTruncated = stepsTruncated
+        self.steps = steps
+        self.isDelta = isDelta
+    }
+
+    public init(json: [String: Any], runId: String, isDelta: Bool) {
+        self.task = LinkTaskStatus(
+            runId: (json["run_id"] as? String) ?? runId,
+            task: (json["task"] as? String) ?? "",
+            origin: (json["origin"] as? String) ?? "",
+            status: (json["status"] as? String) ?? "",
+            instructions: (json["instructions"] as? String) ?? "",
+            output: json["output"] as? String,
+            error: json["error"] as? String
+        )
+        self.headline = (json["headline"] as? String) ?? ""
+        self.stepCount = LinkTask.integer(json["step_count"]) ?? 0
+        self.stepsCursor = LinkTask.integer(json["steps_cursor"]) ?? 0
+        // Absent means "we cannot vouch for it", which is the honest default.
+        self.stepsComplete = (json["steps_complete"] as? Bool) ?? false
+        self.stepsTruncated = (json["steps_truncated"] as? Bool) ?? false
+        self.steps = ((json["steps"] as? [[String: Any]]) ?? []).compactMap(RunStep.init(json:))
+        self.isDelta = isDelta
+    }
+}
+
+extension LinkTask {
+    static func integer(_ value: Any?) -> Int? {
+        if let int = value as? Int { return int }
+        if let double = value as? Double { return Int(double) }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
+}
+
+// MARK: - Progress-aware status route
+
+public extension LinkTaskService {
+    /// Default for services that predate §12 (the test double, older
+    /// desktops): a status with no steps and nothing claimed about them.
+    func taskStatus(runId: String, stepsSince: Int?) async throws -> LinkTaskDetail {
+        LinkTaskDetail(task: try await taskStatus(runId: runId))
+    }
+}
+
+public extension LinkClient {
+    /// `GET /link/tasks/:id[?steps_since=<cursor>]` (§12.2 / §12.3). This is
+    /// the *same* request that carries status — §12.6 forbids polling twice.
+    func taskStatus(runId: String, stepsSince: Int?) async throws -> LinkTaskDetail {
+        var path = "/link/tasks/\(Self.segment(runId))"
+        if let stepsSince { path += "?steps_since=\(stepsSince)" }
+        let json = try await request(path: path, method: "GET", body: nil)
+        return LinkTaskDetail(json: json, runId: runId, isDelta: stepsSince != nil)
     }
 }

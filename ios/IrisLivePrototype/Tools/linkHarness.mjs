@@ -3,6 +3,7 @@
 // real mobile config builder (electron/mobileSession.mjs), and wires FAKE task
 // handlers so no actual Hermes work is dispatched.
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { GoogleGenAI } from "../../../node_modules/@google/genai/dist/node/index.mjs";
@@ -12,6 +13,11 @@ import { buildMobileLiveConfig } from "../../../electron/mobileSession.mjs";
 
 const SCRATCH = process.env.SCRATCH || fs.mkdtempSync(path.join(os.tmpdir(), "iris-link-harness-"));
 const PORT = Number(process.env.PORT || 8799);
+// The real Iris Link server listens here; the shim below fronts it on PORT.
+const UPSTREAM_PORT = PORT + 1;
+// After this many honored resumes, pretend the handle was rejected. Lets one
+// probe run cover both the resumed path and the "could not be restored" path.
+const REFUSE_RESUME_AFTER = Number(process.env.REFUSE_RESUME_AFTER || Infinity);
 const USER = "Nate";
 const MODEL = "models/gemini-3.1-flash-live-preview";
 // How long a fake run "works" before it turns terminal.
@@ -49,6 +55,15 @@ const server = createIrisLinkServer({
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const newSessionExpiresAt = new Date(Date.now() + 60 * 1000).toISOString();
     const ai = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } });
+    // The resume handle the phone asked for, picked up by the shim below.
+    // A real desktop would read it from the request body in
+    // irisLinkServer.mjs and pass it down here; this harness is standing in
+    // for that one change so the phone's half can be proved end to end.
+    const requested = pendingResumeHandle;
+    pendingResumeHandle = "";
+    const honor = Boolean(requested) && resumesHonored < REFUSE_RESUME_AFTER;
+    if (requested && !honor) log("RESUME_REFUSED (standing in for a rejected/expired handle)");
+    if (honor) resumesHonored += 1;
     const token = await ai.authTokens.create({
       config: {
         uses: 1,
@@ -56,11 +71,16 @@ const server = createIrisLinkServer({
         newSessionExpireTime: newSessionExpiresAt,
         liveConnectConstraints: {
           model: MODEL,
-          config: buildMobileLiveConfig({ userName: USER, voice: "Zephyr" }),
+          config: buildMobileLiveConfig({
+            userName: USER,
+            voice: "Zephyr",
+            resumeHandle: honor ? requested : "",
+          }),
         },
       },
     });
-    log("MINTED_TOKEN");
+    lastMintResumed = honor;
+    log("MINTED_TOKEN", honor ? "RESUMING" : "FRESH");
     return { token: token.name, expiresAt, newSessionExpiresAt, model: MODEL };
   },
   checkHermesReachable: async () => true,
@@ -165,7 +185,61 @@ const server = createIrisLinkServer({
   log: (entry) => log("LOG", entry.level, entry.message),
 });
 
-await server.listen({ host: "127.0.0.1", port: PORT });
+// ===== The one desktop change this harness stands in for =====
+//
+// POST /link/gemini-token has to accept an optional {"resume_handle"} and
+// answer with {"resumed": true|false}, because a handle only works when it is
+// baked into the token's own liveConnectConstraints.config — a phone cannot
+// present one on the constrained endpoint (measured; see mobileSession.mjs).
+// That route lives in electron/irisLinkServer.mjs, which this task may not
+// edit, so the real server runs behind this shim instead.
+let pendingResumeHandle = "";
+let lastMintResumed = false;
+let resumesHonored = 0;
+
+await server.listen({ host: "127.0.0.1", port: UPSTREAM_PORT });
+
+const shim = http.createServer((req, res) => {
+  const chunks = [];
+  req.on("data", (chunk) => chunks.push(chunk));
+  req.on("end", () => {
+    const body = Buffer.concat(chunks);
+    const isTokenRoute = req.method === "POST" && req.url === "/link/gemini-token";
+    if (isTokenRoute) {
+      try {
+        const parsed = JSON.parse(body.toString("utf8") || "{}");
+        pendingResumeHandle = String(parsed.resume_handle || "").trim();
+        if (pendingResumeHandle) log("RESUME_HANDLE_REQUESTED (len", pendingResumeHandle.length, ")");
+      } catch {
+        pendingResumeHandle = "";
+      }
+    }
+    const upstream = http.request(
+      { host: "127.0.0.1", port: UPSTREAM_PORT, method: req.method, path: req.url, headers: req.headers },
+      (upstreamRes) => {
+        const out = [];
+        upstreamRes.on("data", (chunk) => out.push(chunk));
+        upstreamRes.on("end", () => {
+          let payload = Buffer.concat(out);
+          if (isTokenRoute && upstreamRes.statusCode === 200) {
+            try {
+              const json = JSON.parse(payload.toString("utf8"));
+              json.resumed = lastMintResumed;
+              payload = Buffer.from(JSON.stringify(json));
+            } catch { /* pass it through untouched */ }
+          }
+          const headers = { ...upstreamRes.headers };
+          delete headers["content-length"];
+          res.writeHead(upstreamRes.statusCode, headers);
+          res.end(payload);
+        });
+      },
+    );
+    upstream.on("error", () => { res.writeHead(502); res.end("{}"); });
+    upstream.end(body);
+  });
+});
+await new Promise((resolve) => shim.listen(PORT, "127.0.0.1", resolve));
 const offer = store.createOffer();
 const deepLink =
   `iris-link://pair?v=1&host=127.0.0.1&port=${PORT}` +

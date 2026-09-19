@@ -62,6 +62,10 @@ final class RunsController: ObservableObject {
         return LinkClient(paired: paired)
     }
 
+    /// The service a pushed run-detail screen polls with. A fresh client per
+    /// screen, so its 2 s loop cannot disturb the list's own.
+    var taskClient: LinkTaskService? { client }
+
     func refresh(notifying: Bool) async {
         guard let client else { return }
         isLoading = true

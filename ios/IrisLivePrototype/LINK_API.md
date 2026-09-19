@@ -95,16 +95,25 @@ the request failing at all = the **Mac/Link** is unreachable;
 
 ### `POST /link/gemini-token`
 
-Body: none. `200` →
+Body: `{}`, or `{"resume_handle": "<a handle the phone was issued>"}`. `200` →
 
 ```json
 {
   "token": "auth_tokens/…",
   "expiresAt": "ISO-8601",
   "newSessionExpiresAt": "ISO-8601",
-  "model": "models/gemini-3.1-flash-live-preview"
+  "model": "models/gemini-3.1-flash-live-preview",
+  "resumed": false
 }
 ```
+
+`resume_handle` asks the desktop to mint a token that reconnects into an
+existing conversation, by putting the handle in the token's own
+`liveConnectConstraints.config.sessionResumption`. `resumed` says whether it
+did. **The phone cannot do this for itself** — see "Reconnecting into the same
+conversation" below. A desktop build that does not implement `resume_handle`
+ignores it and omits `resumed`, which the phone correctly reads as "this is a
+new conversation" and tells the user about.
 
 `502 token_unavailable` if the mint failed (no key configured, upstream error).
 
@@ -115,9 +124,11 @@ Body: none. `200` →
   `liveConnectConstraints.config`, which *replaces* whatever the client sends:
   voice, transcription, system instruction and tool declarations all come from
   the Mac. Anything the phone puts in its setup frame is silently ignored.
-- An early WebSocket close with code **1011** is an authorization failure
-  (expired/spent token), not a network blip. Mint a new token; do not retry the
-  same one.
+- An **early** WebSocket close with code **1011** — before `setupComplete` —
+  is an authorization failure (expired/spent token), not a network blip. Mint a
+  new token; do not retry the same one. A 1011 *later*, under a session that
+  was working, is the token's `expireTime` and is reconnected through, not
+  reported (see "Reconnecting into the same conversation").
 
 ### What the token's config contains (informational — do not send it)
 
@@ -135,11 +146,55 @@ Verified accepted by the real token endpoint on 2026-09-19:
 }
 ```
 
-Because `sessionResumption: {}` is enabled, the server will send
-`sessionResumptionUpdate` messages: keep the newest `newHandle` and reconnect
-with it to continue the same conversation. Because both transcription fields
-are set, the phone receives `inputTranscription` / `outputTranscription` — the
-input transcript is what the gate uses to observe the user's turn (§6).
+Because `sessionResumption` is enabled, the server will send
+`sessionResumptionUpdate` messages: keep the newest `newHandle` where
+`resumable` is true. Because both transcription fields are set, the phone
+receives `inputTranscription` / `outputTranscription` — the input transcript is
+what the gate uses to observe the user's turn (§6).
+
+### Reconnecting into the same conversation
+
+A Live connection does not last. Two server-side deadlines end it, and the
+phone has to survive both:
+
+- a top-level **`goAway`** with a `timeLeft` (a protobuf Duration, e.g.
+  `"9.5s"`), followed by a hang-up. This is a connection rotation on a fixed
+  lifetime — roughly ten minutes — not a fault.
+- the token's own **`expireTime`** (30 min). Measured against the real API: the
+  server closes an otherwise healthy session with close code **1011**, reason
+  **"auth token has expired"**, exactly at `expireTime`.
+
+So **1011 alone does not mean the credential was refused.** It means that only
+before the session became usable (`setupComplete` never arrived, or it arrived
+moments ago) — that is the spent/expired/too-early token, e.g. `"Token has been
+used too many times"`. A 1011 under a session that has been running is a
+routine credential rotation, and the answer is a freshly minted token, not an
+ended conversation.
+
+How a handle is actually presented, all four points verified against the real
+API on 2026-09-19:
+
+1. A handle in the **phone's own setup frame is silently ignored** on the
+   constrained endpoint. The socket opens normally and the conversation is a
+   new one — indistinguishable from sending no handle at all, and from sending
+   a deliberately corrupted one. This is the same "the token's config REPLACES
+   the client's setup frame" rule that already applies to the voice, the prompt
+   and the tools. The **only** path that resumes is a handle baked into the
+   token's `liveConnectConstraints.config`, which is why the route above takes
+   `resume_handle`.
+2. A token is **single use even for a resume**. Offering an already-used token
+   a second time is refused with 1011 `"Token has been used too many times"`,
+   before `setupComplete`. Every reconnect mints a new token.
+3. A **new token can resume a handle issued under a previous token**.
+4. A handle **outlives the token it was issued under**: a session cut off by
+   its token's `expireTime` was resumed afterwards under a new token, with the
+   conversation intact.
+
+The phone therefore: keeps the newest resumable handle in memory (never on
+disk, never logged); on `goAway`, reconnects shortly before the deadline while
+the line is quiet; on an unexpected close, reconnects with backoff 0.5 s, 2 s,
+8 s, 32 s and then gives up with a plain message; and when the desktop answers
+`resumed: false`, starts a fresh session and says so via §7.1.
 
 ---
 
@@ -674,7 +729,10 @@ Phone loop:
 4. If the session drops, the app is killed, or the user barges in before the
    announcement completes, do **not** acknowledge. Step 1 will return it again
    on the next session, which is exactly the "Announcement interrupted"
-   scenario in the dispatch contract.
+   scenario in the dispatch contract. A *reconnect* is this case too: the
+   announcement being spoken when the socket died goes back to the front of the
+   queue and is delivered again on the new connection — once, not twice, and
+   never acknowledged in between.
 
 An acknowledged run never reappears in the undelivered list. Acknowledging an
 unknown id returns `404 task_unknown`; this is safe to ignore.

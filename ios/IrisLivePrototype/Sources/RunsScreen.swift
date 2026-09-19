@@ -52,8 +52,7 @@ extension LinkTask {
         guard stamp > 0 else { return nil }
         // The desktop reports JavaScript timestamps (milliseconds); read as
         // seconds they land tens of thousands of years in the future.
-        let seconds = stamp > 100_000_000_000 ? stamp / 1000 : stamp
-        return Date(timeIntervalSince1970: seconds)
+        return Date(timeIntervalSince1970: IrisEpoch.seconds(stamp))
             .formatted(.relative(presentation: .named))
     }
 }
@@ -82,8 +81,10 @@ struct RunsScreen: View {
             }
     }
 
+    @State private var path: [LinkTask] = []
+
     private var runsStack: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if controller.notificationsUnavailable {
                     noticeRow(
@@ -108,8 +109,16 @@ struct RunsScreen: View {
                     if !active.isEmpty {
                         Section("Active") {
                             ForEach(active) { run in
-                                RunRow(run: run, isAnnouncing: run.runId == announcingRunId) {
-                                    Task { await controller.stop(run) }
+                                NavigationLink(value: run) {
+                                    RunRow(run: run, isAnnouncing: run.runId == announcingRunId)
+                                }
+                                // Stop moved to a swipe and to the detail
+                                // screen's toolbar: a row that pushes cannot
+                                // also carry a button the touch has to miss.
+                                .swipeActions(edge: .trailing) {
+                                    Button("Stop", role: .destructive) {
+                                        Task { await controller.stop(run) }
+                                    }
                                 }
                             }
                         }
@@ -117,18 +126,20 @@ struct RunsScreen: View {
                     if !finished.isEmpty {
                         Section("Finished") {
                             ForEach(finished) { run in
-                                Button {
-                                    Task { await controller.read(run.runId) }
-                                } label: {
-                                    RunRow(run: run, isAnnouncing: run.runId == announcingRunId, onStop: nil)
+                                NavigationLink(value: run) {
+                                    RunRow(run: run, isAnnouncing: run.runId == announcingRunId)
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                     }
                 }
             }
             .listStyle(.insetGrouped)
+            // Pushed, not presented: this sheet is already a presentation, and
+            // a view that is presenting one cannot present a second.
+            .navigationDestination(for: LinkTask.self) { run in
+                detail(for: run)
+            }
             .refreshable { await controller.refresh(notifying: false) }
             .navigationTitle("Runs")
             .navigationBarTitleDisplayMode(.inline)
@@ -140,8 +151,41 @@ struct RunsScreen: View {
             .overlay {
                 if controller.isReadingResult { ProgressView().controlSize(.large) }
             }
+            .onAppear {
+                #if DEBUG
+                // `-uiPreviewRun <runId>` opens straight onto a run's progress
+                // so it can be screenshotted without tapping. DEBUG only, and
+                // only when fixtures were already injected.
+                if injectedRuns != nil, path.isEmpty,
+                   let id = RunsScreen.previewRunFromLaunchArguments(),
+                   let run = runs.first(where: { $0.runId == id }) {
+                    path = [run]
+                }
+                #endif
+            }
         }
     }
+
+    @ViewBuilder
+    private func detail(for run: LinkTask) -> some View {
+        #if DEBUG
+        if injectedRuns != nil, let canned = RunProgressFixtures.detail(for: run.runId) {
+            RunDetailView(run: run, detail: canned, result: RunProgressFixtures.result(for: run.runId))
+        } else {
+            RunDetailView(run: run, service: controller.taskClient)
+        }
+        #else
+        RunDetailView(run: run, service: controller.taskClient)
+        #endif
+    }
+
+    #if DEBUG
+    static func previewRunFromLaunchArguments() -> String? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let index = args.firstIndex(of: "-uiPreviewRun"), index + 1 < args.count else { return nil }
+        return args[index + 1]
+    }
+    #endif
 
     private func noticeRow(_ text: String, symbol: String) -> some View {
         Label {
@@ -159,8 +203,6 @@ struct RunsScreen: View {
 struct RunRow: View {
     let run: LinkTask
     let isAnnouncing: Bool
-    /// nil for a finished run, which is tapped to read rather than stopped.
-    var onStop: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -180,27 +222,23 @@ struct RunRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                // The live line, straight from the desktop's own wording. Only
+                // for an active run, and only when there is something real to
+                // say — an empty headline is never filled in with a guess.
+                if let live = liveLine {
+                    Text(live)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 4)
-
-            if let onStop {
-                Button("Stop", role: .destructive, action: onStop)
-                    .font(.caption.weight(.medium))
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .accessibilityLabel("Stop \(run.displayTitle)")
-            } else {
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
-            }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(run.displayTitle)
-        .accessibilityValue(subtitle)
+        .accessibilityValue([subtitle, liveLine].compactMap { $0 }.joined(separator: " · "))
     }
 
     private var subtitle: String {
@@ -208,6 +246,15 @@ struct RunRow: View {
         if let time = run.relativeTime { parts.append(time) }
         if isAnnouncing { parts.append("Iris is reading this out") }
         return parts.joined(separator: " · ")
+    }
+
+    /// "Running code · 3 steps" — §12.1's two list fields and nothing more.
+    private var liveLine: String? {
+        guard !run.isTerminal else { return nil }
+        var parts: [String] = []
+        if !run.headline.isEmpty { parts.append(run.headline) }
+        if run.stepCount > 0 { parts.append("\(run.stepCount) step\(run.stepCount == 1 ? "" : "s")") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
