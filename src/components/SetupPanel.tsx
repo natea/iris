@@ -21,6 +21,7 @@ type Draft = {
   GEMINI_API_KEY: string;
   GEMINI_LIVE_MODEL: string;
   GEMINI_LIVE_VOICE: string;
+  GEMINI_LIVE_ACCENT: string;
   HERMES_API_URL: string;
   API_SERVER_KEY: string;
   HERMES_BIN: string;
@@ -62,6 +63,7 @@ export default function SetupPanel({
     GEMINI_API_KEY: config.geminiApiKey,
     GEMINI_LIVE_MODEL: config.geminiModel,
     GEMINI_LIVE_VOICE: config.geminiVoice,
+    GEMINI_LIVE_ACCENT: config.geminiAccent,
     HERMES_API_URL: config.hermesUrl,
     API_SERVER_KEY: config.hermesKey,
     HERMES_BIN: config.hermesBin,
@@ -162,6 +164,7 @@ export default function SetupPanel({
     setPreview({ status: "testing" });
     const result = await window.iris.previewVoice({
       voice: draft.GEMINI_LIVE_VOICE,
+      accent: draft.GEMINI_LIVE_ACCENT,
       key: draft.GEMINI_API_KEY.trim(),
     });
     setPreview(result.ok ? { status: "idle" } : { status: "error", message: result.error });
@@ -428,7 +431,7 @@ export default function SetupPanel({
           <ThemedSelect
             ariaLabel="Voice"
             value={draft.GEMINI_LIVE_VOICE}
-            options={config.voices.map((voice) => ({ value: voice, label: voice }))}
+            options={config.voices}
             onChange={(value) => {
               set("GEMINI_LIVE_VOICE", value);
               setPreview({ status: "idle" });
@@ -444,9 +447,27 @@ export default function SetupPanel({
             Preview
           </button>
         </div>
-        <small className="setup-note">Iris's speaking voice. Tap Preview to hear a sample (needs a saved Gemini key).</small>
+        <small className="setup-note">Iris's speaking voice. Tap Preview to hear a sample with the accent below (needs a saved Gemini key). A new voice or accent
+          starts a fresh conversation the next time Iris wakes.</small>
       </label>
       {preview.status === "error" ? <p className="setup-error">{preview.message}</p> : null}
+      <label className="setup-field">
+        <span>Accent</span>
+        <ThemedSelect
+          ariaLabel="Accent"
+          value={draft.GEMINI_LIVE_ACCENT}
+          options={config.accents}
+          onChange={(value) => {
+            set("GEMINI_LIVE_ACCENT", value);
+            setPreview({ status: "idle" });
+          }}
+        />
+        <small className="setup-note">
+          Gemini Live has no regional voices, so Iris asks the model to speak in this English accent. Results vary by
+          voice; preview a few. For another accent, set GEMINI_LIVE_ACCENT to a specific description, e.g. “Welsh
+          English as heard in Cardiff”.
+        </small>
+      </label>
       <label className="setup-field">
         <span>Model</span>
         <ThemedSelect
@@ -667,7 +688,12 @@ export default function SetupPanel({
           <li>
             Gemini key {gemini.status === "ok" ? <Check size={13} className="ok" /> : keyReady ? "added" : "missing"}
           </li>
-          <li>Voice · {draft.GEMINI_LIVE_VOICE}</li>
+          <li>
+            Voice · {draft.GEMINI_LIVE_VOICE}
+            {draft.GEMINI_LIVE_ACCENT
+              ? ` · ${config.accents.find((option) => option.value === draft.GEMINI_LIVE_ACCENT)?.label ?? draft.GEMINI_LIVE_ACCENT}`
+              : ""}
+          </li>
           <li>Name · {draft.IRIS_USER_NAME || "(not set)"}</li>
           <li>Mic · {mic === "granted" ? "granted" : "ask on start"}</li>
         </ul>
