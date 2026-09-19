@@ -36,13 +36,14 @@
 ## 5. iOS: agent work
 
 - [x] 5.1 Implement the dispatch gate as a Swift value type mirroring `hermesGate.mjs` — verify unit tests reject same-turn dispatch, allow confirmed dispatch, and handle decline and amend
-- [ ] 5.2 Implement the Hermes client (dispatch, run status, stored results, interaction responses) against the pinned session — verify a task dispatched from the phone appears in the same session as desktop runs
-- [ ] 5.3 Wire the Live tool declarations to the gate and Hermes client — verify a full voice round trip: request, read-back, confirmation, dispatch, "it started"
-- [ ] 5.4 Implement run list and result reading, including runs dispatched elsewhere — verify a desktop-dispatched result can be opened and read on the phone
+- [x] 5.2 Implement the Hermes client (dispatch, run status, stored results, interaction responses) against the pinned session — verify a task dispatched from the phone appears in the same session as desktop runs
+- [x] 5.3 Wire the Live tool declarations to the gate and Hermes client — verify a full voice round trip: request, read-back, confirmation, dispatch, "it started"
+- [x] 5.4 Implement run list and result reading, including runs dispatched elsewhere — verify a desktop-dispatched result can be opened and read on the phone
 - [ ] 5.5 Implement local completion notifications raised on reconnect — verify a run finishing with the app closed produces a notification that deep-links to the result
 - [ ] 5.6 Implement the secure input surface for credential requests from a run — verify a secret prompt never appears in the transcript or is spoken
 - [ ] 5.7 Reconcile `LINK_API.md` with the desktop where the phone implementer found them disagreeing: the barge-in rule (desktop accepts a read-back interrupted after 48 audible characters; the contract says any interruption invalidates it) and the missing `allowDuringReadback` equivalent — verify the contract, the desktop, and the Swift gate state one rule and share test cases for it
 - [ ] 5.8 Expose pending approvals to the phone (a field on task status or an undelivered-style list) so an approval can be surfaced rather than only answered — verify a run awaiting approval shows as such on the phone and that approving still requires a user turn
+- [ ] 5.9 Send push notifications from the desktop through APNs (token-based auth with the team's .p8 key, no third-party relay): the phone registers its device token and environment with Iris Link; the desktop pushes when a phone-dispatched run finishes and when a run is waiting on the user — verify a notification arrives with the app closed and the phone locked, that opening it shows that run, and that a revoked device stops receiving pushes
 
 ## 6. Siri entry points
 

@@ -231,6 +231,8 @@ test("status reports device identity and nothing secret", async (t) => {
     deviceId: body.deviceId,
     deviceName: "Nate's iPhone",
     hermesReachable: true,
+    // Whether this Mac can push at all — a boolean, never a key or a token.
+    pushConfigured: false,
     userName: "Nate",
     liveModel: "models/gemini-3.1-flash-live-preview",
     voice: "Zephyr",
@@ -879,4 +881,148 @@ test("an authenticated device reports a fresh last-seen immediately", async (t) 
     device.lastSeenAt > pairedAt,
     "the Settings list must not say 'never' for a device that just called",
   );
+});
+
+const PUSH_TOKEN = "f".repeat(64);
+
+test("a paired device registers, replaces and removes its push token", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body: paired } = await pair(link, "Nate's iPhone");
+
+  const registered = await linkFetch(link, paired.credential, "/link/push-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: PUSH_TOKEN, environment: "sandbox" }),
+  });
+  assert.equal(registered.status, 200);
+  assert.deepEqual(registered.body, { ok: true, pushEnabled: true, environment: "sandbox" });
+  assert.equal(link.store.getPushTarget(paired.deviceId).token, PUSH_TOKEN);
+
+  // Idempotent: the phone re-registers on every launch.
+  const again = await linkFetch(link, paired.credential, "/link/push-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: PUSH_TOKEN, environment: "sandbox" }),
+  });
+  assert.equal(again.status, 200);
+
+  // A new token from APNs replaces the old one.
+  const replaced = await linkFetch(link, paired.credential, "/link/push-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: "e".repeat(64), environment: "production" }),
+  });
+  assert.equal(replaced.body.environment, "production");
+  assert.equal(link.store.getPushTarget(paired.deviceId).token, "e".repeat(64));
+
+  const removed = await linkFetch(link, paired.credential, "/link/push-token", { method: "DELETE" });
+  assert.equal(removed.status, 200);
+  assert.deepEqual(removed.body, { ok: true, pushEnabled: false });
+  assert.equal(link.store.getPushTarget(paired.deviceId), null);
+});
+
+test("push registration refuses an unpaired caller and a malformed token", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  for (const method of ["PUT", "DELETE"]) {
+    const anonymous = await linkFetch(link, "", "/link/push-token", {
+      method,
+      ...(method === "PUT" ? { body: JSON.stringify({ token: PUSH_TOKEN, environment: "sandbox" }) } : {}),
+    });
+    assert.equal(anonymous.status, 401);
+    assert.deepEqual(anonymous.body, { error: "not_paired" });
+  }
+  assert.equal(link.store.getPushTarget(paired.deviceId), null);
+
+  const bad = await linkFetch(link, paired.credential, "/link/push-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: "not-a-token", environment: "sandbox" }),
+  });
+  assert.equal(bad.status, 400);
+  assert.deepEqual(bad.body, { error: "invalid_token" });
+
+  const wrongEnvironment = await linkFetch(link, paired.credential, "/link/push-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: PUSH_TOKEN, environment: "staging" }),
+  });
+  assert.deepEqual(wrongEnvironment.body, { error: "invalid_environment" });
+
+  const wrongMethod = await linkFetch(link, paired.credential, "/link/push-token");
+  assert.equal(wrongMethod.status, 405);
+
+  const notJson = await fetch(`${link.origin}/link/push-token`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${paired.credential}`, "Content-Type": "text/plain" },
+    body: "token=x",
+  });
+  assert.equal(notJson.status, 415);
+});
+
+test("no route ever hands a push token back", async (t) => {
+  const desktop = fakeDesktop({
+    runs: [{ run_id: "run-1", task: "Ship it", status: "completed", origin: "device:x", announced_at: 0 }],
+  });
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  await linkFetch(link, paired.credential, "/link/push-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: PUSH_TOKEN, environment: "sandbox" }),
+  });
+
+  for (const routePath of ["/link/status", "/link/tasks", "/link/tasks/run-1", "/link/tasks/run-1/result"]) {
+    const response = await linkFetch(link, paired.credential, routePath);
+    assert.equal(JSON.stringify(response.body).includes(PUSH_TOKEN), false, routePath);
+  }
+  assert.equal(JSON.stringify(link.store.listDevices()).includes(PUSH_TOKEN), false);
+});
+
+test("status reports whether this Mac can push", async (t) => {
+  const link = await startLink({
+    getInfo: () => ({ hermesReachable: true, pushConfigured: true, userName: "Nate" }),
+  });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const status = await linkFetch(link, paired.credential, "/link/status");
+  assert.equal(status.body.pushConfigured, true);
+});
+
+test("a run waiting on the user carries pending_approval to the phone", async (t) => {
+  // The desktop derives this from real registry state; the route must carry it
+  // through on both the list and the single-task view, unchanged.
+  const pendingApproval = {
+    request_id: "approval:deadbeefdeadbeef",
+    summary: "Hermes wants to run: rm -rf build",
+    can_approve_from_phone: true,
+  };
+  const desktop = fakeDesktop({
+    runs: [
+      {
+        run_id: "run-1",
+        task: "Clean the build",
+        status: "running",
+        origin: "device:x",
+        announced_at: 0,
+        pending_approval: pendingApproval,
+      },
+      {
+        run_id: "run-2",
+        task: "Nothing pending",
+        status: "running",
+        origin: "device:x",
+        announced_at: 0,
+        pending_approval: null,
+      },
+    ],
+  });
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const list = await linkFetch(link, paired.credential, "/link/tasks");
+  assert.deepEqual(list.body.tasks[0].pending_approval, pendingApproval);
+  assert.equal(list.body.tasks[1].pending_approval, null);
+
+  const single = await linkFetch(link, paired.credential, "/link/tasks/run-1");
+  assert.deepEqual(single.body.pending_approval, pendingApproval);
 });

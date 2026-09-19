@@ -72,6 +72,10 @@ Hermes exposes both an event stream and run status. The phone subscribes to the 
 
 Phase 1 uses local notifications raised when the app regains contact and finds terminal runs it has not announced. No push infrastructure, no Apple Push certificate, no third-party relay. The trade-off is that a completion arrives when the app next has a live connection rather than instantly; push can be added later behind the same spec.
 
+### 6a. Push comes from the Mac, directly to Apple
+
+Decision 6's local notifications only fire while the app is alive, which in practice means during a voice session. A suspended app cannot poll, so "tell me when Hermes is done" needs real push. The desktop sends it: APNs token-based auth (an ES256 JWT signed with the team's `.p8` key, kept in `~/.iris` and never sent to a phone) over HTTP/2 straight to Apple. No relay service, no third party sees task text beyond Apple's delivery. The phone registers its device token and APNs environment (sandbox for Xcode builds, production for TestFlight) with Iris Link; tokens are stored per paired device and deleted on revoke or when Apple reports them invalid. Payloads carry the run id and a short title, not the result body — the phone fetches the result over Link when opened, so nothing sensitive sits in a notification that a lock screen can show. Verified during apply: the key authenticates against both APNs hosts.
+
 ### 7. Siri and Shortcuts are an entry point, not a second voice channel
 
 Siri can start Iris and hand it a line of text. It cannot hand over the conversation. Apple's speech pipeline delivers a transcribed `String` to an `AppIntent`; no App Intents or SiriKit API hands a third-party app the live microphone stream (an absence-of-API finding — Apple documents no such mechanism rather than stating the negative). So the design treats Siri as an *ignition key*: "Hey Siri, start an Iris session" or "Hey Siri, send a task to Iris", after which Iris's own Live session owns the microphone.

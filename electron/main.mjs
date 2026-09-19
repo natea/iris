@@ -28,7 +28,12 @@ import {
   HermesHttpError,
   stableHermesMemoryKey,
 } from "./hermesClient.mjs";
-import { RunRegistry, TERMINAL_RUN_STATUSES } from "./runRegistry.mjs";
+import {
+  RunRegistry,
+  TERMINAL_RUN_STATUSES,
+  approvalRequestId,
+  pendingApprovalFor,
+} from "./runRegistry.mjs";
 import {
   assertTrustedIpc,
   installWindowSecurity,
@@ -62,6 +67,8 @@ import { HERMES_FUNCTION_DECLARATIONS } from "./hermesTools.mjs";
 import { buildMobileLiveConfig } from "./mobileSession.mjs";
 import { createPairingStore } from "./pairingStore.mjs";
 import { createIrisLinkServer } from "./irisLinkServer.mjs";
+import { createApnsClient, resolveApnsConfig } from "./apnsClient.mjs";
+import { createPushNotifier } from "./pushNotifier.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
 import {
   envFlag,
@@ -472,6 +479,10 @@ const ALLOWED_CONFIG_KEYS = new Set([
   "IRIS_CAMERA_DEVICE",
   "IRIS_LINK_ENABLED",
   "IRIS_LINK_PORT",
+  "IRIS_APNS_KEY_PATH",
+  "IRIS_APNS_KEY_ID",
+  "IRIS_APNS_TEAM_ID",
+  "IRIS_APNS_TOPIC",
 ]);
 
 function userConfigPath() {
@@ -533,6 +544,8 @@ function writeUserConfig(rawUpdates) {
     allowedKeys: ALLOWED_CONFIG_KEYS,
     secretKeys: new Set(["GEMINI_API_KEY", "API_SERVER_KEY"]),
   });
+  // Push config is resolved lazily and cached; a settings save re-resolves it.
+  resetApnsClient();
   return getFullConfig();
 }
 
@@ -700,6 +713,7 @@ function getInteractiveHermes() {
   transport.on("interaction-resolved", ({ runId, interactionId, type }) => {
     pendingHermesInteractions.delete(runId);
     runRegistry.setInteraction(runId, null);
+    pushNotifier.clearAttention(runId);
     emitEvent({
       type: "hermes_interaction",
       action: "resolved",
@@ -767,6 +781,18 @@ function handleInteractiveRequest({ runId, task, interaction }) {
   };
   pendingHermesInteractions.set(runId, pending);
   runRegistry.setInteraction(runId, interaction);
+  // Clarifications, sudo prompts and secrets do not travel over Iris Link, so
+  // a phone-dispatched run that hits one is stuck until someone is at the Mac.
+  const interactionOwner = runRegistry.get(runId)?.origin || "";
+  if (String(interactionOwner).startsWith("device:")) {
+    void pushNotifier.notifyNeedsAttention({
+      runId,
+      task,
+      origin: interactionOwner,
+      requestId: `interaction:${interaction.id}`,
+      canApproveFromPhone: false,
+    });
+  }
   emitEvent({
     type: "hermes_interaction",
     action: "request",
@@ -1454,6 +1480,7 @@ async function approveHermesAction({ run_id, choice }, { trustedUi = false } = {
   pendingHermesApprovals.delete(runId);
   approvalResolutionCooldown.set(runId, Date.now());
   runRegistry.setApproval(runId, null);
+  pushNotifier.clearAttention(runId);
   return { status: "resolved", run_id: runId, choice: cleanChoice, result };
 }
 
@@ -2171,6 +2198,7 @@ function forwardHermesEvent(runId, task, parsed) {
     pendingHermesApprovals.delete(runId);
     approvalResolutionCooldown.set(runId, Date.now());
     runRegistry.setApproval(runId, null);
+    pushNotifier.clearAttention(runId);
   }
   emitEvent({
     type: "hermes_task_event",
@@ -2193,6 +2221,18 @@ function forwardHermesEvent(runId, task, parsed) {
 }
 
 function announceHermesApproval(runId, task, approval) {
+  // A dangerous-command approval on a run the phone dispatched: the phone can
+  // answer this one itself, so say so. Deduped per distinct request.
+  const owner = runRegistry.get(runId)?.origin || "";
+  if (String(owner).startsWith("device:")) {
+    void pushNotifier.notifyNeedsAttention({
+      runId,
+      task,
+      origin: owner,
+      requestId: approvalRequestId(approval),
+      canApproveFromPhone: true,
+    });
+  }
   const eventText = [
     "SYSTEM_EVENT_HERMES_APPROVAL_REQUIRED",
     `run_id: ${runId}`,
@@ -2441,7 +2481,19 @@ function announceHermesCompletion({ runId, task, status, output }) {
     session_id: entry?.sessionId || hermesSessionId(),
   });
 
-  if (ownedByDevice) return;
+  if (ownedByDevice) {
+    // The phone owns announcing this. It may be asleep in a pocket, so the
+    // Mac pushes it — after a short grace window, so a phone that is already
+    // in a live session can announce it first and ack it away.
+    pushNotifier.clearAttention(runId);
+    void pushNotifier.notifyRunTerminal({
+      runId,
+      task: task || entry?.task || "",
+      status,
+      origin: entry?.origin || "",
+    });
+    return;
+  }
 
   if (liveSession) {
     // Tracked until a turn completes: if the connection dies before Iris
@@ -3749,6 +3801,64 @@ function getPairingStore() {
   return pairingStore;
 }
 
+// ===== Push notifications (APNs, direct from this Mac) =====
+//
+// A phone that dispatched a task cannot poll while it is suspended, so the
+// Mac tells it: a run it owns finished, or a run it owns is waiting on a
+// human. The .p8 key stays in ~/.iris and is read lazily — a missing or
+// incomplete configuration simply disables push, with one log line, never an
+// error dialog and never a crash.
+let apnsClient = null;
+let apnsResolved = false;
+
+function resetApnsClient() {
+  try {
+    apnsClient?.close?.();
+  } catch {
+    // Closing a dead HTTP/2 session is not an error worth surfacing.
+  }
+  apnsClient = null;
+  apnsResolved = false;
+}
+
+function getApnsClient() {
+  if (apnsResolved) return apnsClient;
+  apnsResolved = true;
+  const config = resolveApnsConfig({ env: process.env });
+  if (!config.ok) {
+    emitEvent({
+      type: "log",
+      level: "info",
+      message: `Push notifications are off (${config.reason}). Set IRIS_APNS_TEAM_ID and an APNs key in ~/.iris to enable them.`,
+    });
+    return null;
+  }
+  apnsClient = createApnsClient({
+    keyId: config.keyId,
+    teamId: config.teamId,
+    topic: config.topic,
+    // Read at first use and on every regeneration: the key never sits in a
+    // long-lived variable and is never logged.
+    loadKey: () => fs.readFileSync(config.keyPath, "utf8"),
+    log: (message) => emitEvent({ type: "log", level: "warn", message }),
+  });
+  return apnsClient;
+}
+
+function pushConfigured() {
+  return Boolean(getApnsClient());
+}
+
+const pushNotifier = createPushNotifier({
+  getClient: getApnsClient,
+  getTarget: (deviceId) => getPairingStore().getPushTarget(deviceId),
+  // The phone acks an in-session announcement with POST /link/tasks/:id/announced;
+  // if that lands inside the grace window, the push is dropped.
+  isAnnounced: (runId) => Boolean(runRegistry.get(runId)?.announcedAt),
+  dropToken: (deviceId) => getPairingStore().clearPushToken(deviceId),
+  log: (message, level = "info") => emitEvent({ type: "log", level, message }),
+});
+
 // Ephemeral tokens are what let the phone hold a credential that expires in
 // minutes instead of a Gemini key that has to be rotated everywhere.
 // Optional: an accent line for the phone's prompt, from the same setting the
@@ -3807,6 +3917,9 @@ function linkTaskSummary(entry) {
     created_at: entry.createdAt,
     updated_at: entry.updatedAt,
     announced_at: entry.announcedAt || 0,
+    // Real registry state only: an approval Hermes actually asked for, or an
+    // interactive prompt Link cannot carry. Null when nothing is pending.
+    pending_approval: pendingApprovalFor(entry),
   };
 }
 
@@ -3926,6 +4039,7 @@ async function startIrisLink() {
     },
     getInfo: () => ({
       hermesReachable: Boolean(lastHermesReachable),
+      pushConfigured: pushConfigured(),
       userName: userDisplayName(),
       liveModel: process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview",
       voice: process.env.GEMINI_LIVE_VOICE || "Zephyr",
@@ -3963,6 +4077,7 @@ function irisLinkStatus() {
     ...irisLinkState,
     enabled: irisLinkEnabled(),
     tailscaleAddress: findTailscaleIPv4(),
+    pushConfigured: pushConfigured(),
     devices: getPairingStore().listDevices(),
   };
 }

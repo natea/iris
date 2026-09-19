@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,51 @@ export const TERMINAL_RUN_STATUSES = new Set([
   "canceled",
   "error",
 ]);
+
+// A stable identity for one pending approval request. Derived from the
+// request's own content rather than its timestamp, so the same request seen
+// again over a poll fallback is recognized as the same request.
+export function approvalRequestId(approval) {
+  if (!approval) return "";
+  const material = `${approval.command || ""}\n${approval.reason || ""}`;
+  return `approval:${crypto.createHash("sha256").update(material, "utf8").digest("hex").slice(0, 16)}`;
+}
+
+/**
+ * What a phone is allowed to know about a run that is waiting on a human,
+ * derived from real registry state only: an approval Hermes actually asked
+ * for, or an interactive prompt that Iris Link cannot carry. A secret prompt
+ * never has its question repeated here.
+ */
+export function pendingApprovalFor(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  if (entry.approval) {
+    const command = String(entry.approval.command || "").trim();
+    const reason = String(entry.approval.reason || "").trim();
+    const summary = command
+      ? `Hermes wants to run: ${command}`
+      : reason || "Hermes is paused for approval.";
+    return {
+      request_id: approvalRequestId(entry.approval),
+      summary: summary.slice(0, 500),
+      can_approve_from_phone: true,
+    };
+  }
+  if (entry.interaction) {
+    const secret = Boolean(entry.interaction.secret);
+    const question = String(entry.interaction.question || entry.interaction.command || "").trim();
+    return {
+      request_id: `interaction:${entry.interaction.id || ""}`,
+      summary: secret
+        ? "Hermes is asking for a credential. It can only be entered on the Mac."
+        : (question || "Hermes is asking a question.").slice(0, 500),
+      // Clarifications, sudo prompts and secrets travel over Hermes'
+      // interactive WebSocket, which Iris Link does not carry.
+      can_approve_from_phone: false,
+    };
+  }
+  return null;
+}
 
 function cleanEntry(raw) {
   if (!raw || typeof raw !== "object") return null;

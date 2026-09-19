@@ -718,3 +718,161 @@ From `openspec/.../agent-dispatch-contract`:
 - **Secure handling of interaction requests**: approvals through §5.7;
   clarifications, sudo and secrets are refused with "needs attention on the
   Mac" and never spoken.
+
+---
+
+## 11. Push notifications
+
+There *is* push, and it comes from the Mac. The desktop signs an ES256
+provider JWT with the team's `.p8` key (kept in `~/.iris`, never sent to a
+phone) and posts straight to Apple over HTTP/2 — no relay, no third party.
+§9's "there is no push" applies to everything except the two notifications
+below; polling is still how the phone learns anything else.
+
+`GET /link/status` carries `"pushConfigured": true|false` — whether this Mac
+can push at all. It is a boolean and nothing else. When it is `false`,
+registering still succeeds but no notification will ever arrive; say so rather
+than promising alerts.
+
+### 11.1 `PUT /link/push-token` — register
+
+Request: `{"token": "<APNs device token, hex>", "environment": "sandbox"|"production"}`
+
+`200` → `{"ok": true, "pushEnabled": true, "environment": "sandbox"}`
+
+Idempotent, and there is exactly **one token per paired device**: registering
+again replaces whatever was stored. The token is written next to the device's
+credential hash in the desktop's `devices.json`, is never returned by any
+route, and is deleted when the device is revoked.
+
+Errors: `400 invalid_token` (not hex, or not a plausible length) ·
+`400 invalid_environment` · `400 invalid_json` · `415` for a non-JSON
+`Content-Type` · `401 not_paired` · `405 method_not_allowed`.
+
+### 11.2 `DELETE /link/push-token` — unregister
+
+Body: none. `200` → `{"ok": true, "pushEnabled": false}`. Safe to call when
+nothing is registered. Call it when the user turns notifications off in Iris.
+
+### 11.3 What the phone must do
+
+1. Ask for notification authorization, then register with APNs and `PUT` the
+   token **after the user grants permission** — and again on every
+   `didRegisterForRemoteNotificationsWithDeviceToken`, because iOS can issue a
+   new token after a restore, a reinstall, or an OS update. Re-`PUT` on every
+   launch as well: it is idempotent and costs one request.
+2. **Derive `environment` from the build, not from a setting.** A token minted
+   under the development entitlement only works against Apple's sandbox host
+   and vice versa; sending to the wrong host returns `BadDeviceToken` and the
+   Mac drops the token.
+   - Debug / run-from-Xcode → `"sandbox"` (`aps-environment: development`)
+   - TestFlight / App Store → `"production"` (`aps-environment: production`)
+   The conventional derivation is `#if DEBUG` → sandbox, else check whether the
+   receipt URL ends in `sandboxReceipt` (TestFlight still uses the production
+   APNs host, so TestFlight → `"production"`).
+3. On tap, read `run_id` from the payload and open **that run** — fetch
+   `GET /link/tasks/:id` and, if terminal, `GET /link/tasks/:id/result`. Never
+   speak a result from the notification body; it does not contain one.
+4. Keep acking with `POST /link/tasks/:id/announced` (§8). The ack is what
+   suppresses a duplicate push: the desktop waits **6 seconds** after a
+   phone-dispatched run finishes before pushing, and skips the push entirely if
+   the ack has landed by then. A phone that is in a live session therefore
+   announces the result itself and the user gets no banner; a phone that is
+   asleep gets the banner.
+5. Foreground presentation is the phone's choice, but a run the user is already
+   hearing about should not also banner.
+
+### 11.4 The two payloads
+
+Both are alert pushes (`apns-push-type: alert`, priority 10) with
+`apns-collapse-id` set, so a repeat for the same run replaces the old banner
+rather than stacking. Neither ever contains Hermes' output: a lock screen shows
+notifications, so the body is the task title only, shortened to ~110
+characters.
+
+**A run this phone dispatched finished** — sent once per run, `apns-collapse-id`
+= the run id:
+
+```json
+{
+  "aps": {
+    "alert": { "title": "Hermes finished", "body": "<short task title>" },
+    "sound": "default",
+    "thread-id": "<run id>",
+    "interruption-level": "active"
+  },
+  "run_id": "<run id>",
+  "kind": "run_complete"
+}
+```
+
+The title is the run's **real** terminal status: `Hermes finished`
+(`completed`), `Hermes couldn't finish` (`failed` / `error`), or
+`Hermes was stopped` (`cancelled` / `canceled`). Do not restate it as success.
+
+**A run this phone dispatched is waiting on the user** — sent at most once per
+distinct pending request (a repeated poll of the same request does not push
+again; a *different* request on the same run does):
+
+```json
+{
+  "aps": {
+    "alert": { "title": "Hermes needs you", "body": "<short task title> — Open Iris to approve or deny it." },
+    "sound": "default",
+    "thread-id": "<run id>",
+    "interruption-level": "time-sensitive"
+  },
+  "run_id": "<run id>",
+  "kind": "needs_attention",
+  "request_id": "<opaque id for this pending request>",
+  "can_approve_from_phone": true
+}
+```
+
+When `can_approve_from_phone` is `false` the body says it needs an answer on
+the Mac — that is a Hermes interaction (clarification, sudo, secret), which
+Iris Link does not carry (§4). Say it needs the Mac; do not offer to approve
+it.
+
+`interruption-level: "time-sensitive"` breaks through Focus and requires the
+**Time Sensitive Notifications** capability in the app's entitlements;
+completions use `"active"` and do not.
+
+### 11.5 `pending_approval` on the task API
+
+`GET /link/tasks/:id` and every entry of `GET /link/tasks` now carry:
+
+```json
+"pending_approval": {
+  "request_id": "approval:9f3c…",
+  "summary": "Hermes wants to run: rm -rf build",
+  "can_approve_from_phone": true
+}
+```
+
+or `null` when nothing is pending. It is sourced from the desktop's real run
+state — an approval Hermes actually asked for, or an interactive prompt that
+Link cannot carry — never from a guess. `request_id` matches the one in a
+`needs_attention` payload for the same request, so a push and a poll can be
+reconciled. A secret prompt never has its question repeated here; the summary
+says only that a credential must be entered on the Mac.
+
+`can_approve_from_phone: true` means §5.7 applies: describe it, **end the
+turn**, and only call `POST /link/tasks/:id/approval` after the user has
+answered in a turn of their own. The push is a nudge, never authorization.
+
+### 11.6 iOS capabilities required
+
+- **Push Notifications** capability, i.e. an `aps-environment` entitlement
+  (`development` for Xcode builds, `production` for TestFlight/App Store).
+  Without it, `registerForRemoteNotifications()` fails and there is no token.
+- **Time Sensitive Notifications** capability for
+  `interruption-level: "time-sensitive"` to be honored.
+- **No background mode is needed.** Plain alert pushes are displayed by the
+  system; the app does not have to be running and does not need
+  `remote-notification` in `UIBackgroundModes`. (That mode is only for silent
+  content-available pushes, which Iris does not send.)
+- Revoking the device on the Mac deletes its token along with its credential,
+  so a revoked phone stops receiving pushes immediately. A token Apple reports
+  as `Unregistered` or `BadDeviceToken` is dropped by the desktop; the phone
+  re-registers to start receiving again.

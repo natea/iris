@@ -193,6 +193,8 @@ type IrisLinkDevice = {
   name: string;
   createdAt: number;
   lastSeenAt: number;
+  pushEnabled?: boolean;
+  pushEnvironment?: string;
 };
 
 type IrisLinkStatus = {
@@ -202,6 +204,7 @@ type IrisLinkStatus = {
   port: number | null;
   reason: string;
   tailscaleAddress: string | null;
+  pushConfigured?: boolean;
   devices: IrisLinkDevice[];
 };
 
