@@ -1,0 +1,38 @@
+name: IrisLivePrototype
+
+options:
+  bundleIdPrefix: app.iris
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+targets:
+  IrisLivePrototype:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Iris Live
+        NSMicrophoneUsageDescription: "Iris streams your voice to the Gemini Live API so you can talk to the assistant."
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iris.liveprototype
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        # Leave DEVELOPMENT_TEAM empty: pick your team in Xcode > Signing.
+        DEVELOPMENT_TEAM: YA3FM9C24T
+        SWIFT_STRICT_CONCURRENCY: minimal
