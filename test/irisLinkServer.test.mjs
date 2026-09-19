@@ -12,6 +12,7 @@ import {
   normalizeProxyPath,
 } from "../electron/irisLinkServer.mjs";
 import { createPairingStore } from "../electron/pairingStore.mjs";
+import { createRunSteps, parseStepsSince } from "../electron/runSteps.mjs";
 
 const SHARED_KEY = "hermes-shared-key-do-not-leak";
 
@@ -1025,4 +1026,150 @@ test("a run waiting on the user carries pending_approval to the phone", async (t
 
   const single = await linkFetch(link, paired.credential, "/link/tasks/run-1");
   assert.deepEqual(single.body.pending_approval, pendingApproval);
+});
+
+// ===== Live progress (§4, "Live progress") =====
+//
+// Wired the way main.mjs wires it: the real accumulator fed the same
+// `hermes_task_event` payloads emitEvent() forwards to the renderer, its
+// summary folded into every list entry and its snapshot into the detail.
+function fakeProgressDesktop(runSteps, runs) {
+  const registry = new Map(runs.map((run) => [run.run_id, { ...run }]));
+  const summary = (run) => ({ ...run, ...runSteps.summary(run.run_id) });
+  return {
+    registry,
+    tasks: {
+      list: () => [...registry.values()].map(summary),
+      get: async ({ runId, stepsSince }) => {
+        const run = registry.get(runId);
+        if (!run) return { error: "task_unknown" };
+        return {
+          ...summary(run),
+          ...runSteps.snapshot(runId, { since: parseStepsSince(stepsSince) }),
+          run_id: runId,
+        };
+      },
+    },
+  };
+}
+
+test("live progress rides along with the task API and steps_since narrows it", async (t) => {
+  const runSteps = createRunSteps();
+  const desktop = fakeProgressDesktop(runSteps, [
+    { run_id: "run-live", task: "Tidy the desktop", status: "running", origin: "desktop" },
+    { run_id: "run-quiet", task: "Just started", status: "started", origin: "desktop" },
+  ]);
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const get = (path) => linkFetch(link, paired.credential, path);
+
+  // Nothing has happened yet: no invented progress anywhere.
+  const cold = await get("/link/tasks");
+  assert.equal(cold.body.tasks[0].headline, "");
+  assert.equal(cold.body.tasks[0].step_count, 0);
+  const coldDetail = await get("/link/tasks/run-live");
+  assert.deepEqual(coldDetail.body.steps, []);
+  assert.equal(coldDetail.body.steps_complete, false);
+
+  runSteps.record({
+    type: "hermes_task_event",
+    run_id: "run-live",
+    event: "tool.started",
+    tool: "Terminal",
+    preview: "osascript <<'EOF' tell application",
+  });
+
+  const listed = await get("/link/tasks");
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.tasks[0].headline, "Running code");
+  assert.equal(listed.body.tasks[0].step_count, 1);
+  // The list stays small: the step list itself is detail-only.
+  assert.equal(listed.body.tasks[0].steps, undefined);
+  assert.equal(listed.body.tasks[1].headline, "");
+
+  const detail = await get("/link/tasks/run-live");
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.headline, "Running code");
+  assert.equal(detail.body.step_count, 1);
+  assert.equal(detail.body.steps_complete, true);
+  assert.equal(detail.body.steps.length, 1);
+  assert.deepEqual(
+    {
+      id: detail.body.steps[0].id,
+      tool: detail.body.steps[0].tool,
+      category: detail.body.steps[0].category,
+      status: detail.body.steps[0].status,
+      duration_ms: detail.body.steps[0].duration_ms,
+    },
+    { id: "s1", tool: "Terminal", category: "code", status: "running", duration_ms: null },
+  );
+  const cursor = detail.body.steps_cursor;
+
+  const unchanged = await get(`/link/tasks/run-live?steps_since=${cursor}`);
+  assert.deepEqual(unchanged.body.steps, []);
+  assert.equal(unchanged.body.step_count, 1);
+
+  runSteps.record({
+    type: "hermes_task_event",
+    run_id: "run-live",
+    event: "tool.completed",
+    tool: "Terminal",
+    duration: 1.2,
+  });
+  const delta = await get(`/link/tasks/run-live?steps_since=${cursor}`);
+  assert.equal(delta.body.steps.length, 1);
+  assert.equal(delta.body.steps[0].id, "s1");
+  assert.equal(delta.body.steps[0].status, "done");
+  assert.equal(delta.body.steps[0].duration_ms, 1200);
+  assert.equal(delta.body.headline, "Thinking…");
+
+  // A step id is a valid cursor, and garbage simply returns everything.
+  assert.equal((await get("/link/tasks/run-live?steps_since=s0")).body.steps.length, 1);
+  assert.equal((await get("/link/tasks/run-live?steps_since=nonsense")).body.steps.length, 1);
+  assert.equal((await get("/link/tasks/nope?steps_since=1")).status, 404);
+});
+
+test("a preview carrying a credential is redacted before it reaches the phone", async (t) => {
+  const runSteps = createRunSteps();
+  const desktop = fakeProgressDesktop(runSteps, [
+    { run_id: "run-1", task: "Call the API", status: "running", origin: "desktop" },
+  ]);
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  runSteps.record({
+    type: "hermes_task_event",
+    run_id: "run-1",
+    event: "tool.started",
+    tool: "Terminal",
+    preview: 'curl -H "Authorization: Bearer sk-live-9f3a2b1c4d5e6f7a" https://api.example.com',
+  });
+  const detail = await linkFetch(link, paired.credential, "/link/tasks/run-1");
+  const body = JSON.stringify(detail.body);
+  assert.equal(body.includes("sk-live-9f3a2b1c4d5e6f7a"), false);
+  assert.match(detail.body.steps[0].preview, /\[redacted\]/);
+});
+
+test("live progress is never served to an unpaired caller", async (t) => {
+  const runSteps = createRunSteps();
+  const desktop = fakeProgressDesktop(runSteps, [
+    { run_id: "run-1", task: "Secret work", status: "running", origin: "desktop" },
+  ]);
+  runSteps.record({
+    type: "hermes_task_event",
+    run_id: "run-1",
+    event: "tool.started",
+    tool: "Terminal",
+    preview: "rm -rf /tmp/scratch",
+  });
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+
+  for (const path of ["/link/tasks", "/link/tasks/run-1", "/link/tasks/run-1?steps_since=0"]) {
+    const result = await linkFetch(link, "", path);
+    assert.equal(result.status, 401, path);
+    assert.deepEqual(result.body, { error: "not_paired" });
+  }
 });

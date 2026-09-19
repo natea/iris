@@ -70,6 +70,7 @@ import { createIrisLinkServer } from "./irisLinkServer.mjs";
 import { createApnsClient, resolveApnsConfig } from "./apnsClient.mjs";
 import { createPushNotifier } from "./pushNotifier.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
+import { createRunSteps, parseStepsSince } from "./runSteps.mjs";
 import {
   envFlag,
   loadEnvFiles,
@@ -293,7 +294,19 @@ function emitToRenderer(channel, payload) {
   return rendererBridge.send(channel, payload);
 }
 
+// Every Hermes activity event, from every transport (the runs-API SSE stream
+// via forwardHermesEvent and the interactive gateway via its `run-event`
+// handler), is emitted here on its way to the renderer. Recording it on the
+// way past is the one narrow point that gives Iris Link the same live progress
+// the desktop task card builds — without changing anything the renderer sees.
+const runSteps = createRunSteps();
+
 function emitEvent(event) {
+  try {
+    runSteps.record(event);
+  } catch {
+    // Progress telemetry must never break the event path it rides on.
+  }
   emitToRenderer("sidecar:event", { timestamp: Date.now() / 1000, ...event });
 }
 
@@ -3920,6 +3933,10 @@ function linkTaskSummary(entry) {
     // Real registry state only: an approval Hermes actually asked for, or an
     // interactive prompt Link cannot carry. Null when nothing is pending.
     pending_approval: pendingApprovalFor(entry),
+    // Live progress, list-sized: what the run is doing right now and how many
+    // steps have been recorded. The step list itself is detail-only, so the
+    // list response stays small. Both come from real events or nothing at all.
+    ...runSteps.summary(entry.runId),
   };
 }
 
@@ -3980,11 +3997,16 @@ async function startIrisLink() {
           .slice(0, 50)
           .map((entry) => linkTaskSummary(entry));
       },
-      get: async ({ runId }) => {
+      get: async ({ runId, stepsSince }) => {
         const entry = runRegistry.get(runId);
         if (!entry) return { error: "task_unknown" };
         const status = await getHermesTaskStatus({ run_id: runId });
-        return { ...linkTaskSummary(entry), ...status, run_id: runId };
+        // The step list rides along with the honest status. After an Iris
+        // restart mid-run the in-memory steps are gone: the snapshot says so
+        // with `steps_complete: false` and an empty list rather than
+        // implying the run did nothing.
+        const progress = runSteps.snapshot(runId, { since: parseStepsSince(stepsSince) });
+        return { ...linkTaskSummary(entry), ...status, ...progress, run_id: runId };
       },
       result: async ({ runId }) => {
         const entry = runRegistry.get(runId);

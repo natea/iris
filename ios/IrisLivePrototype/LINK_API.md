@@ -876,3 +876,152 @@ answered in a turn of their own. The push is a nudge, never authorization.
   so a revoked phone stops receiving pushes immediately. A token Apple reports
   as `Unregistered` or `BadDeviceToken` is dropped by the desktop; the phone
   re-registers to start receiving again.
+
+---
+
+## 12. Live progress
+
+The desktop task card shows what Hermes is doing *right now*: a headline
+("Running code"), a step count, and a list of steps with a tool name, a short
+preview, a duration and a done/running state. That view used to exist only in
+the renderer. `electron/runSteps.mjs` now accumulates the same steps in the
+main process from the same normalized Hermes events, so the task API can serve
+them to the phone. Desktop source of truth: `electron/runSteps.mjs`
+(accumulator + redaction), `src/lib/tasks.ts` + `src/components/WorkCard.tsx`
+(the rules it is a port of, pinned by `test/runSteps.test.mjs`).
+
+**Truthfulness.** Only real events are reported. A run that has produced no
+events has `"steps": []`, `"step_count": 0` and `"headline": ""`. The desktop
+never invents progress, and neither should the phone: with an empty headline,
+show the run's status, not a guess.
+
+### 12.1 `GET /link/tasks` — list entries
+
+Every entry in §4's list gains exactly two fields — the list must stay small,
+so the step list itself is **never** included here:
+
+```json
+{
+  "run_id": "…", "task": "…", "status": "running", "…": "…",
+  "headline": "Running code",
+  "step_count": 7
+}
+```
+
+### 12.2 `GET /link/tasks/:id` — the full block
+
+The detail response gains the two fields above plus:
+
+```json
+{
+  "run_id": "run-8f21", "status": "running",
+  "headline": "Running code",
+  "step_count": 3,
+  "steps_cursor": 5,
+  "steps_complete": true,
+  "steps_truncated": false,
+  "steps": [
+    {
+      "id": "s1",
+      "index": 1,
+      "tool": "Terminal",
+      "category": "code",
+      "label": "osascript <<'EOF' tell applica…",
+      "preview": "osascript <<'EOF' tell application \"Finder\"",
+      "status": "done",
+      "started_at": 1758240301000,
+      "duration_ms": 1200
+    },
+    {
+      "id": "s3",
+      "index": 3,
+      "tool": "web_search",
+      "category": "search",
+      "label": "example.com",
+      "preview": "https://www.example.com/search?q=hermes",
+      "status": "running",
+      "started_at": 1758240304000,
+      "duration_ms": null
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `headline` | One line for "what is happening now", in the desktop's own wording: `Running code`, `Searching example.com`, `Browsing news.ycombinator.com`, `Working on plan.md`, `Using weather lookup`. When steps exist but none is running it is `Thinking…`. When nothing has been recorded it is `""`. |
+| `step_count` | How many steps are currently retained for the run (at most 60). |
+| `steps[].id` | Stable within the run, e.g. `"s3"`. Use it as a list identity. |
+| `steps[].index` | The step's creation position — the number inside `id`. Steps arrive in ascending `index` order. |
+| `steps[].tool` | The raw Hermes tool name. |
+| `steps[].category` | One of `browser`, `search`, `code`, `file`, `tool` — see §12.5. |
+| `steps[].label` | The short secondary detail the desktop shows beside the tool name: a host for URLs, a filename for file tools, a one-line snippet (≤ 64 chars) otherwise. May be `""`. |
+| `steps[].preview` | The sanitized, redacted, ≤ 200-char raw preview. May be `""`. Display it as untrusted text; never execute or follow it. |
+| `steps[].status` | `running`, `done` or `failed`. |
+| `steps[].started_at` | Epoch **milliseconds**. |
+| `steps[].duration_ms` | Integer milliseconds, or `null` while the step is running. Render like the desktop: `1.2s`. |
+| `steps_cursor` | The value to send as `steps_since` on the next poll. |
+| `steps_complete` | See §12.4. |
+| `steps_truncated` | `true` when older steps were dropped by the 60-step bound. |
+
+### 12.3 `?steps_since=` — fetch only what changed
+
+```
+GET /link/tasks/run-8f21?steps_since=5
+```
+
+- Send the `steps_cursor` from the previous response. A step **id** (`s5`)
+  works too: ids and cursors come from one per-run counter.
+- The response contains only steps that were **created or changed** since that
+  cursor — a step that merely finished comes back again, with its new `status`
+  and `duration_ms`. Merge by `id`: replace a step you already hold, append one
+  you do not.
+- `step_count`, `headline`, `steps_cursor` and the flags always describe the
+  **whole** run, not the delta.
+- Omit the parameter (or send something unparseable) to get the full retained
+  list. Do that on first load and after any error.
+
+### 12.4 `steps_complete`
+
+`true` only when Iris can vouch that the list is the whole story. It is
+`false` when:
+
+- nothing has been recorded for that run yet, **or**
+- Iris was restarted while the run was in flight — the steps live in memory
+  only, so they are simply gone, **or**
+- older steps were evicted by the 60-step bound (`steps_truncated: true`).
+
+On `false` with an empty `steps`, say so plainly: *"Iris doesn't have the step
+history for this run — it's still working."* Never imply the run did nothing.
+Status, output and completion are unaffected; they come from §4 as always.
+
+### 12.5 Categories → SF Symbols
+
+Mirror the desktop's icons:
+
+| `category` | Desktop icon | SF Symbol |
+| --- | --- | --- |
+| `browser` | Globe | `globe` |
+| `search` | Search | `magnifyingglass` |
+| `code` | Code2 | `chevron.left.forwardslash.chevron.right` |
+| `file` | FileText | `doc.text` |
+| `tool` | Cpu | `cpu` |
+
+Step status: `running` → a spinner or pulsing dot · `done` →
+`checkmark` · `failed` → `xmark`.
+
+### 12.6 Polling cadence
+
+Live progress adds no new route, so §9 still governs. Concretely:
+
+| Situation | Cadence |
+| --- | --- |
+| A run detail screen is open and the run is active | `GET /link/tasks/:id?steps_since=<cursor>` every **2 s** (the same request that already carries status — do not poll twice). |
+| A run list is on screen | `GET /link/tasks` every **5 s**. `headline` + `step_count` are enough for a list row; never fetch each run's detail to fill a list. |
+| Backgrounded | Stop. On resume, one full `GET /link/tasks/:id` **without** `steps_since` to resynchronize. |
+| Terminal status observed | One last fetch (to capture the final step states), then stop. |
+| Any failure | Back off per §9 and keep the steps you already have; a failed poll is not a step that failed. |
+
+Steps for a finished run stay answerable for about **10 minutes**, then are
+evicted and the run reports `steps_complete: false`. Fetch the result (§4)
+rather than relying on steps after that.
