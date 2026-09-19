@@ -58,6 +58,9 @@ import {
 import { HermesGatewayClient } from "./hermesGatewayClient.mjs";
 import { HermesInteractiveTransport } from "./hermesInteractiveTransport.mjs";
 import { isSleepIntent } from "./sleepIntent.mjs";
+import { createPairingStore } from "./pairingStore.mjs";
+import { createIrisLinkServer } from "./irisLinkServer.mjs";
+import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
 import {
   envFlag,
   loadEnvFiles,
@@ -465,6 +468,8 @@ const ALLOWED_CONFIG_KEYS = new Set([
   "IRIS_AUTO_WAKE_ON_HERMES",
   "IRIS_MIC_DEVICE",
   "IRIS_CAMERA_DEVICE",
+  "IRIS_LINK_ENABLED",
+  "IRIS_LINK_PORT",
 ]);
 
 function userConfigPath() {
@@ -512,6 +517,9 @@ function getFullConfig() {
     // Read-only defaults surfaced in the UI (not editable from settings).
     voiceDuplexMode: process.env.VOICE_DUPLEX_MODE || "speaker",
     speakerEchoGuard: process.env.SPEAKER_ECHO_GUARD_SECONDS || "0.9",
+    // Iris Link only starts once, at app.whenReady(); changing this key writes
+    // .env but does not start/stop the server, so the UI must say "restart".
+    linkEnabled: envFlag("IRIS_LINK_ENABLED", false),
   };
 }
 
@@ -980,19 +988,26 @@ async function hermesRequest(method, pathName, body = undefined, options = {}) {
   return currentHermesClient().request(method, pathName, body, options);
 }
 
+// Last observed Hermes reachability, surfaced to a paired phone through
+// /link/status so it can say WHICH of the two is down rather than guessing.
+let lastHermesReachable = false;
+
 async function checkHermesStatus() {
   try {
     if (interactiveTransportEnabled()) {
       await getInteractiveHermes().start();
       const detail = { transport: "tui_gateway", interactive: true };
       emitEvent({ type: "hermes_status", status: "ready", detail });
+      lastHermesReachable = true;
       return { reachable: true, health: detail, capabilities: detail };
     }
     const capabilities = await currentHermesClient().capabilities();
     emitEvent({ type: "hermes_status", status: "ready", detail: capabilities });
+    lastHermesReachable = true;
     return { reachable: true, health: capabilities, capabilities };
   } catch (error) {
     emitEvent({ type: "hermes_status", status: "error", error: error.message });
+    lastHermesReachable = false;
     return { reachable: false, error: error.message };
   }
 }
@@ -3808,6 +3823,149 @@ function installAppMenu() {
   Menu.setApplicationMenu(menu);
 }
 
+// ===== Iris Link =====
+// A paired iPhone reaches Iris over Tailscale through this one small HTTP
+// service. It is OFF unless IRIS_LINK_ENABLED=1, and it binds the Tailscale
+// address ONLY — never 0.0.0.0, never a LAN address. Hermes stays on loopback
+// and its shared key is attached here, server-side, never sent to a client.
+const IRIS_LINK_DEFAULT_PORT = 8765;
+const LINK_TOKEN_TTL_SECONDS = 30 * 60;
+const LINK_NEW_SESSION_TTL_SECONDS = 60;
+let pairingStore = null;
+let irisLink = null;
+let irisLinkState = { enabled: false, listening: false, host: null, port: null, reason: "disabled" };
+
+function irisLinkEnabled() {
+  return envFlag("IRIS_LINK_ENABLED", false);
+}
+
+function irisLinkPort() {
+  const value = Number.parseInt(process.env.IRIS_LINK_PORT || "", 10);
+  return Number.isInteger(value) && value > 0 && value < 65536 ? value : IRIS_LINK_DEFAULT_PORT;
+}
+
+function getPairingStore() {
+  if (!pairingStore) pairingStore = createPairingStore();
+  return pairingStore;
+}
+
+// Ephemeral tokens are what let the phone hold a credential that expires in
+// minutes instead of a Gemini key that has to be rotated everywhere.
+async function mintGeminiToken() {
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+  if (!apiKey) throw new Error("No Gemini API key is configured.");
+  const model = process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview";
+  const expiresAt = new Date(Date.now() + LINK_TOKEN_TTL_SECONDS * 1000).toISOString();
+  const newSessionExpiresAt = new Date(Date.now() + LINK_NEW_SESSION_TTL_SECONDS * 1000).toISOString();
+  // Ephemeral tokens require v1alpha (verified in scripts/test-live-ephemeral-token.mjs).
+  const tokenAi = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } });
+  const token = await tokenAi.authTokens.create({
+    config: {
+      uses: 1,
+      expireTime: expiresAt,
+      newSessionExpireTime: newSessionExpiresAt,
+      liveConnectConstraints: { model, config: { responseModalities: ["AUDIO"] } },
+    },
+  });
+  if (!token?.name) throw new Error("Gemini returned no token name.");
+  return { token: token.name, expiresAt, newSessionExpiresAt, model };
+}
+
+async function startIrisLink() {
+  if (irisLink) return irisLinkState;
+  if (!irisLinkEnabled()) {
+    irisLinkState = { enabled: false, listening: false, host: null, port: null, reason: "disabled" };
+    return irisLinkState;
+  }
+  const host = findTailscaleIPv4();
+  if (!host) {
+    irisLinkState = { enabled: true, listening: false, host: null, port: null, reason: "no_tailscale_address" };
+    emitEvent({
+      type: "log",
+      level: "warn",
+      message: "Iris Link is enabled but no Tailscale address was found, so it did not start.",
+    });
+    return irisLinkState;
+  }
+  const port = irisLinkPort();
+  const server = createIrisLinkServer({
+    pairingStore: getPairingStore(),
+    mintGeminiToken,
+    hermes: {
+      baseUrl: hermesBaseUrl(),
+      getApiKey: () => process.env.API_SERVER_KEY || "",
+      getSessionKey: () =>
+        (process.env.IRIS_HERMES_MEMORY_KEY || "").trim() || stableHermesMemoryKey(userDisplayName()),
+    },
+    getInfo: () => ({
+      hermesReachable: Boolean(lastHermesReachable),
+      userName: userDisplayName(),
+      liveModel: process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview",
+      voice: process.env.GEMINI_LIVE_VOICE || "Zephyr",
+      accent: process.env.GEMINI_LIVE_ACCENT || "",
+    }),
+    log: (entry) => emitEvent({ type: "log", level: entry.level || "info", message: entry.message }),
+  });
+  try {
+    await server.listen({ host, port });
+    irisLink = server;
+    irisLinkState = { enabled: true, listening: true, host, port, reason: "" };
+    emitEvent({ type: "log", level: "info", message: `Iris Link is listening on ${host}:${port}.` });
+  } catch (error) {
+    // A Link that cannot bind must never take the desktop app down with it.
+    irisLink = null;
+    irisLinkState = { enabled: true, listening: false, host, port, reason: "listen_failed" };
+    emitEvent({
+      type: "log",
+      level: "error",
+      message: `Iris Link could not bind ${host}:${port}: ${error?.message || error}`,
+    });
+  }
+  return irisLinkState;
+}
+
+function stopIrisLink() {
+  const server = irisLink;
+  irisLink = null;
+  irisLinkState = { ...irisLinkState, listening: false, reason: "stopped" };
+  return server ? server.close().catch(() => undefined) : Promise.resolve();
+}
+
+function irisLinkStatus() {
+  return {
+    ...irisLinkState,
+    enabled: irisLinkEnabled(),
+    tailscaleAddress: findTailscaleIPv4(),
+    devices: getPairingStore().listDevices(),
+  };
+}
+
+// The QR payload carries the mesh address and a one-time secret; the six-digit
+// code is shown on both ends so the user can compare before approving.
+// It MUST be an app deep link, never bare text or JSON: a phone camera offers
+// to web-search text it cannot open, which sends the secret to a search engine.
+// An unclaimed custom scheme gives the camera nothing to act on, and once the
+// iOS app registers `iris-link://` the scan opens it directly.
+function createIrisLinkOffer() {
+  if (!irisLinkState.listening || !irisLinkState.host) {
+    return { ok: false, error: irisLinkState.reason || "not_running" };
+  }
+  const offer = getPairingStore().createOffer();
+  const query = new URLSearchParams({
+    v: "1",
+    host: irisLinkState.host,
+    port: String(irisLinkState.port),
+    secret: offer.secret,
+    name: userDisplayName(),
+  });
+  return {
+    ok: true,
+    payload: `iris-link://pair?${query.toString()}`,
+    code: offer.code,
+    expiresAt: offer.expiresAt,
+  };
+}
+
 app.whenReady().then(() => {
   if (appIcon && process.platform === "darwin" && app.dock) {
     app.dock.setIcon(appIcon);
@@ -3925,6 +4083,10 @@ app.whenReady().then(() => {
       mainWindow.setIgnoreMouseEvents(!on, { forward: true });
     }
   });
+  trustedHandle("link:status", () => irisLinkStatus());
+  trustedHandle("link:create-offer", () => createIrisLinkOffer());
+  trustedHandle("link:devices", () => getPairingStore().listDevices());
+  trustedHandle("link:revoke", (_event, deviceId) => getPairingStore().revoke(String(deviceId || "")));
   trustedHandle("sidecar:command", (_event, command) => sendCommand(command));
   trustedOn("live:audio", (_event, chunk) => {
     const byteLength =
@@ -3949,6 +4111,7 @@ app.whenReady().then(() => {
   // always free (lexicon rebuild + loading cached vectors); it embeds new
   // notes only when IRIS_BRAIN_AUTO_INDEX is enabled.
   setTimeout(() => refreshBrainSearch(), 4000);
+  void startIrisLink();
   // If the Hermes API is down, bring the gateway up so dispatches just work.
   setTimeout(() => {
     void ensureHermesRunning().finally(() => recoverHermesRuns());
@@ -4018,6 +4181,7 @@ app.on("before-quit", () => {
   hermesRuns.clear();
   interactiveHermes?.close({ force: true });
   interactiveHermes = null;
+  void stopIrisLink();
   closePreviewSession();
   void stopLive({ forQuit: true });
 });

@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld("iris", {
     ipcRenderer.invoke("hermes:approve", { run_id: runId, choice }),
   respondHermesInteraction: (payload) =>
     ipcRenderer.invoke("hermes:interaction-response", payload),
+  getLinkStatus: () => ipcRenderer.invoke("link:status"),
+  createLinkOffer: () => ipcRenderer.invoke("link:create-offer"),
+  listLinkDevices: () => ipcRenderer.invoke("link:devices"),
+  revokeLinkDevice: (deviceId) => ipcRenderer.invoke("link:revoke", deviceId),
   loadBrain: () => ipcRenderer.invoke("brain:load"),
   readBrainNote: (relPath) => ipcRenderer.invoke("brain:read", relPath),
   searchBrain: (query, topK) => ipcRenderer.invoke("brain:search", query, topK),
