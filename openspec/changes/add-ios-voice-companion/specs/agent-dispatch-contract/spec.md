@@ -25,6 +25,35 @@ A client SHALL NOT dispatch work to the agent without an explicit user confirmat
 - **WHEN** the user changes a detail instead
 - **THEN** the client replaces the staged proposal with the amended brief and requires confirmation again
 
+### Requirement: Confirmation by an explicit control
+
+A client MAY offer on-screen controls that answer a staged proposal without speech. Such a control SHALL count as the user's confirmation only when it is a deliberate user action on a trusted surface showing the complete brief it confirms. The assistant SHALL NOT be able to trigger it, and its existence SHALL NOT relax the two-step rule for anything the assistant does by itself.
+
+#### Scenario: Confirmed by tapping
+
+- **WHEN** a proposal is staged and the user activates the confirm control
+- **THEN** the client dispatches exactly the staged brief shown to the user, once, and tells the assistant it was sent so the assistant acknowledges rather than dispatching again
+
+#### Scenario: Declined by tapping
+
+- **WHEN** the user activates the decline control
+- **THEN** the client discards the staged proposal, dispatches nothing, and tells the assistant it was declined
+
+#### Scenario: The user wants to change it
+
+- **WHEN** the user activates the control for changing the request
+- **THEN** the assistant stops speaking and listens, the proposal stays staged and unsent, and any amended brief requires confirmation again
+
+#### Scenario: The brief on screen is the brief that is sent
+
+- **WHEN** the staged brief changes or is replaced after the controls appeared
+- **THEN** the controls act only on the brief currently shown, and a confirmation for a brief that is no longer staged dispatches nothing
+
+#### Scenario: The assistant cannot press the button
+
+- **WHEN** the assistant attempts to dispatch without a user turn or a user control action
+- **THEN** the dispatch is refused exactly as it would be if no controls existed
+
 ### Requirement: Self-contained task briefs
 
 A dispatched brief SHALL stand alone without the conversation that produced it. The client SHALL transmit the brief as staged, preserving every concrete detail the user supplied — names, numbers, dates, URLs, file paths, budgets, constraints, and the expected output format.
