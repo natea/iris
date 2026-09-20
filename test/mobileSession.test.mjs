@@ -236,3 +236,13 @@ test("the mobile prompt explains the on-screen answer buttons and that the model
   assert.match(text, /do NOT call submit_hermes_task/);
   assert.match(text, /never press these buttons yourself/);
 });
+
+test("phone sessions use low start-of-speech sensitivity so speaker echo does not interrupt Iris", async () => {
+  const { buildMobileLiveConfig, buildMobilePreviewConfig } = await import("../electron/mobileSession.mjs");
+  const detection = buildMobileLiveConfig({ userName: "Nate", voice: "Algenib" }).realtimeInputConfig.automaticActivityDetection;
+  assert.equal(detection.startOfSpeechSensitivity, "START_SENSITIVITY_LOW");
+  assert.ok(detection.prefixPaddingMs >= 100 && detection.prefixPaddingMs <= 300);
+  assert.notEqual(detection.disabled, true, "barge-in must still work");
+  // A preview never listens, so it carries no input configuration at all.
+  assert.equal(buildMobilePreviewConfig({ voice: "Algenib" }).realtimeInputConfig, undefined);
+});

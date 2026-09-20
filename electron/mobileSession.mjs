@@ -144,6 +144,19 @@ export function buildMobileLiveConfig({
     // with an already-spent one is refused with 1011 "Token has been used too
     // many times", so every resume needs a freshly minted token.
     sessionResumption: handle ? { handle } : {},
+    // A phone is usually on its loudspeaker, where a little of Iris's own voice
+    // gets past echo cancellation. Gemini Live defaults to HIGH start-of-speech
+    // sensitivity, so that residue reads as the user talking and she cuts
+    // herself off mid-sentence (seen on device, intermittently, speaker only).
+    // LOW sensitivity plus a short required run of speech ignores the residue;
+    // a person actually speaking over her still interrupts. Verified accepted
+    // in a constrained token against the live API.
+    realtimeInputConfig: {
+      automaticActivityDetection: {
+        startOfSpeechSensitivity: "START_SENSITIVITY_LOW",
+        prefixPaddingMs: 120,
+      },
+    },
     inputAudioTranscription: {},
     outputAudioTranscription: {},
     tools: [
