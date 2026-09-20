@@ -65,6 +65,7 @@ struct RunProgressStore: Equatable {
     private(set) var stepCount = 0
     private(set) var stepsComplete = false
     private(set) var stepsTruncated = false
+    private(set) var unavailableReason = ""
     private(set) var hasLoaded = false
 
     /// Set when the server's cursor moved backwards (Iris restarted, or the
@@ -111,6 +112,7 @@ struct RunProgressStore: Equatable {
         stepCount = detail.stepCount
         stepsComplete = detail.stepsComplete
         stepsTruncated = detail.stepsTruncated
+        unavailableReason = detail.stepsUnavailableReason
         cursor = detail.stepsCursor
         hasLoaded = true
         // A rewind is repaired by the full list we just took, so the next poll
@@ -133,6 +135,7 @@ struct RunProgressStore: Equatable {
             return isActive
                 ? "Iris doesn't have the step history for this run — it's still working."
                 : "Iris doesn't have the step history for this run."
+                    + (unavailableReason.isEmpty ? "" : " (\(unavailableReason))")
         }
         return "This may not be the full step history — Iris can't vouch for what came before."
     }

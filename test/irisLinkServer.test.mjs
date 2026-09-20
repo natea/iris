@@ -241,6 +241,7 @@ test("status reports device identity and nothing secret", async (t) => {
     hermesReachable: true,
     // Whether this Mac can push at all — a boolean, never a key or a token.
     pushConfigured: false,
+    build: null,
     userName: "Nate",
     liveModel: "models/gemini-3.1-flash-live-preview",
     voice: "Zephyr",
@@ -1559,4 +1560,16 @@ test("/link/summary says so when the desktop has no summary handler", async (t) 
   const summary = await linkFetch(link, paired.credential, "/link/summary");
   assert.equal(summary.status, 501);
   assert.deepEqual(summary.body, { error: "tasks_unavailable" });
+});
+
+test("status carries the desktop build stamp so a stale Mac app is visible from the phone", async (t) => {
+  const link = await startLink({
+    getInfo: () => ({ build: { commit: "abc1234", dirty: true, version: "0.4.0", startedAt: 1789870000000 } }),
+  });
+  t.after(() => link.close());
+  const { body } = await pair(link);
+  const response = await fetch(`${link.origin}/link/status`, { headers: { Authorization: `Bearer ${body.credential}` } });
+  assert.deepEqual((await response.json()).build, {
+    commit: "abc1234", dirty: true, version: "0.4.0", started_at: 1789870000000,
+  });
 });

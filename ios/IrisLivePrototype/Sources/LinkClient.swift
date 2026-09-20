@@ -240,6 +240,11 @@ public struct LinkStatus: Sendable, Equatable {
     /// §11 — whether this Mac can push at all. `false` means registering will
     /// succeed and no notification will ever arrive; say so.
     public let pushConfigured: Bool
+    /// Which desktop build answered: a short commit (with "+" when the working
+    /// tree had uncommitted changes) and when that process started. The Mac's
+    /// main process does not hot-reload, so this is how a stale Mac app shows.
+    public var macBuild: String = ""
+    public var macStartedAtMs: Double = 0
 
     public init(
         deviceId: String, deviceName: String, hermesReachable: Bool,
@@ -492,7 +497,7 @@ public struct LinkClient: Sendable {
     public func status() async throws -> LinkStatus {
         let json = try await send(path: "/link/status", method: "GET", body: nil, authenticated: true)
         guard (json["ok"] as? Bool) == true else { throw LinkError.badResponse("status was not ok") }
-        return LinkStatus(
+        var status = LinkStatus(
             deviceId: (json["deviceId"] as? String) ?? "",
             deviceName: (json["deviceName"] as? String) ?? "",
             hermesReachable: (json["hermesReachable"] as? Bool) ?? false,
@@ -506,6 +511,14 @@ public struct LinkClient: Sendable {
             defaultVoice: (json["default_voice"] as? String) ?? "",
             pushConfigured: (json["pushConfigured"] as? Bool) ?? false
         )
+        if let build = json["build"] as? [String: Any] {
+            let commit = (build["commit"] as? String) ?? ""
+            let version = (build["version"] as? String) ?? ""
+            let dirty = (build["dirty"] as? Bool) ?? false
+            status.macBuild = commit.isEmpty ? version : "\(commit)\(dirty ? "+" : "")"
+            status.macStartedAtMs = (build["started_at"] as? NSNumber)?.doubleValue ?? 0
+        }
+        return status
     }
 
     // MARK: Push registration (LINK_API.md §11)

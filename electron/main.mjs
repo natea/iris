@@ -97,7 +97,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 
 const { app, BrowserWindow, ipcMain, session, nativeImage, Menu, Tray, screen, globalShortcut, shell, powerMonitor } = electron;
 
@@ -1486,6 +1486,21 @@ async function sessionRunsFromTranscript(sessionId) {
   if (current?.output) runs.push(current);
   return runs;
 }
+
+// What is actually running, captured once at boot. The main process does not
+// hot-reload, so "did the Mac pick up that change?" is otherwise a guess.
+const irisBuildInfo = (() => {
+  const info = { commit: "", dirty: false, version: app.getVersion?.() || "", startedAt: Date.now() };
+  try {
+    const git = (args) =>
+      execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    info.commit = git(["rev-parse", "--short", "HEAD"]);
+    info.dirty = git(["status", "--porcelain", "--untracked-files=no"]).length > 0;
+  } catch {
+    // A packaged app has no repository; the version is the stamp there.
+  }
+  return info;
+})();
 
 // Finished runs are immutable, so a rebuilt step list is cached for good.
 const historyStepCache = new Map();
@@ -4245,8 +4260,20 @@ async function startIrisLink() {
         if (finished && progress.step_count === 0) {
           // Nothing in memory (restart, or evicted after the run ended): the
           // saved transcript still has every tool call this run made.
-          const restored = await historyStepsForRun(entry).catch(() => null);
+          // Never swallow the reason: "no steps" with no explanation is
+          // undiagnosable from the phone.
+          let reason = "";
+          const restored = await historyStepsForRun(entry).catch((error) => {
+            reason = `transcript_error: ${String(error?.message || error).slice(0, 120)}`;
+            return null;
+          });
           if (restored) progress = restored;
+          else progress = { ...progress, steps_unavailable_reason: reason || "no_matching_transcript_run" };
+          emitEvent({
+            type: "log",
+            level: restored ? "info" : "warn",
+            message: `Link steps for ${runId}: ${restored ? `${restored.step_count} from transcript` : progress.steps_unavailable_reason}`,
+          });
         }
         return { ...linkTaskSummary(entry), ...status, ...progress, run_id: runId };
       },
@@ -4304,6 +4331,7 @@ async function startIrisLink() {
     getInfo: () => ({
       hermesReachable: Boolean(lastHermesReachable),
       pushConfigured: pushConfigured(),
+      build: irisBuildInfo,
       userName: userDisplayName(),
       liveModel: process.env.GEMINI_LIVE_MODEL || "models/gemini-3.1-flash-live-preview",
       voice: process.env.GEMINI_LIVE_VOICE || "Zephyr",

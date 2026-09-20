@@ -475,10 +475,22 @@ struct SettingsView: View {
 
     // MARK: Debug
 
+    /// "Mac build 8adda8d+ · started 23:44" — the first thing to check when a
+    /// change to the Mac app does not seem to have taken effect.
+    private var macBuildLine: String {
+        guard let status = pairing.status else { return "Mac build: not connected" }
+        guard !status.macBuild.isEmpty else { return "Mac build: unknown (this Mac app predates the build stamp — restart it)" }
+        guard status.macStartedAtMs > 0 else { return "Mac build \(status.macBuild)" }
+        let started = Date(timeIntervalSince1970: status.macStartedAtMs / 1000)
+        return "Mac build \(status.macBuild) · started \(started.formatted(date: .omitted, time: .shortened)) (\(started.formatted(.relative(presentation: .named))))"
+    }
+
     private var debugSection: some View {
         Section {
             DisclosureGroup("Debug", isExpanded: $showDebug) {
                 VStack(alignment: .leading, spacing: 4) {
+                    Text(macBuildLine)
+                    Divider()
                     Text(session.audioStatus.routeLine)
                     Text(session.audioStatus.engineLine)
                     Text("in \(session.audioChunksReceived) chunks · \(session.audioBytesReceived / 1024) KB → scheduled \(session.audioStatus.buffersScheduled) · dropped \(session.audioStatus.buffersDropped)")

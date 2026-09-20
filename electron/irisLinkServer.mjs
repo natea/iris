@@ -281,6 +281,13 @@ export function createIrisLinkServer({
       // A boolean and nothing else: whether this Mac can push at all. The
       // phone uses it to explain why a registration will not produce alerts.
       pushConfigured: Boolean(info.pushConfigured),
+      // Which desktop build answered, so a stale Mac app is visible from the phone.
+      build: info.build && typeof info.build === "object" ? {
+        commit: String(info.build.commit || ""),
+        dirty: Boolean(info.build.dirty),
+        version: String(info.build.version || ""),
+        started_at: Number(info.build.startedAt) || 0,
+      } : null,
       userName: info.userName || "",
       liveModel: info.liveModel || "",
       voice: info.voice || "",

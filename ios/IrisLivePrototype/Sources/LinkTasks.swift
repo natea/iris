@@ -462,6 +462,8 @@ public struct LinkTaskDetail: Sendable, Equatable {
     public let stepsCursor: Int
     public let stepsComplete: Bool
     public let stepsTruncated: Bool
+    /// Why the Mac had no steps to give, when it says (diagnostic, not prose).
+    public var stepsUnavailableReason: String = ""
     public let steps: [RunStep]
     public let isDelta: Bool
 
@@ -499,6 +501,7 @@ public struct LinkTaskDetail: Sendable, Equatable {
         self.stepsTruncated = (json["steps_truncated"] as? Bool) ?? false
         self.steps = ((json["steps"] as? [[String: Any]]) ?? []).compactMap(RunStep.init(json:))
         self.isDelta = isDelta
+        self.stepsUnavailableReason = (json["steps_unavailable_reason"] as? String) ?? ""
     }
 }
 
