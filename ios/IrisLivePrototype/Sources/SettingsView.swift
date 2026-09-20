@@ -24,6 +24,7 @@ struct SettingsView: View {
     @Binding var voice: String
 
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(Handedness.storageKey) private var handednessSetting = Handedness.right.rawValue
     @State private var showUnpairConfirm = false
     @State private var showDebug = false
 
@@ -36,6 +37,8 @@ struct SettingsView: View {
                 } else {
                     unpairedSection
                 }
+
+                answerButtonsSection
 
                 notificationsSection
 
@@ -309,6 +312,26 @@ struct SettingsView: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    // MARK: Answer buttons
+
+    /// Which side the big "Yes" / "Approve" button sits on. A preference, not
+    /// a secret, so it lives in UserDefaults next to the voice choice.
+    private var answerButtonsSection: some View {
+        Section {
+            Picker("Button side", selection: $handednessSetting) {
+                ForEach(Handedness.allCases) { hand in
+                    Text(hand.title).tag(hand.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("handedness-picker")
+        } header: {
+            Text("Answer buttons")
+        } footer: {
+            Text("Puts the green Yes button on the side your thumb reaches most easily. The red No moves to the far side.")
+        }
     }
 
     // MARK: Notifications

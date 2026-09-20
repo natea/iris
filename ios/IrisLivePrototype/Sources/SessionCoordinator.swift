@@ -15,11 +15,51 @@ import Foundation
 
 // MARK: - What the UI is told
 
+/// The staged brief as the screen shows it. The id is what a tap answers for.
+public struct StagedProposal: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let task: String
+    public let urgency: String
+
+    public init(id: String, task: String, urgency: String = "normal") {
+        self.id = id
+        self.task = task
+        self.urgency = urgency
+    }
+}
+
+/// Which on-screen control the user tapped.
+public enum ProposalAnswer: String, Sendable, Equatable {
+    case yes
+    case no
+    case explain
+}
+
+/// What the tap actually did. Never a guess: `sent` is only returned after the
+/// Mac answered with a run id, and every other case means nothing was sent.
+public enum ProposalAnswerOutcome: Sendable, Equatable {
+    case sent(runId: String)
+    /// The same proposal had already been sent — a second tap, or the model's
+    /// own submit winning the race. Same run, no second dispatch.
+    case alreadySent(runId: String)
+    case declined
+    case explaining
+    /// The brief that button belonged to is not the staged one any more.
+    case stale
+    /// Nothing was sent; the proposal is still staged. Plain-language reason.
+    case failed(message: String)
+}
+
 public enum CoordinatorEvent: Sendable {
     /// A human-readable line for the debug log.
     case log(String)
-    /// The staged brief while the gate waits for confirmation, or nil.
-    case pendingProposal(String?)
+    /// The staged proposal while the gate waits for an answer, or nil.
+    ///
+    /// It carries the ID as well as the brief because the on-screen answer
+    /// buttons act on ONE proposal: the one whose complete brief is on the
+    /// card. Without the id a tap could only mean "whatever is staged now",
+    /// which is exactly the confusion the spec forbids.
+    case pendingProposal(StagedProposal?)
     /// The run list changed (dispatched, polled, or refreshed).
     case runs([LinkTask])
     /// A tool call finished. `json` is the exact `response` object sent back
@@ -365,7 +405,104 @@ public actor SessionCoordinator {
     }
 
     private func publishPendingProposal() async {
-        notify(.pendingProposal(await router.pendingProposal()?.task))
+        guard let staged = await router.pendingProposal() else {
+            notify(.pendingProposal(nil))
+            return
+        }
+        notify(.pendingProposal(StagedProposal(id: staged.id, task: staged.task, urgency: staged.urgency)))
+    }
+
+    // MARK: Answers given by tapping
+    //
+    // SECURITY INVARIANT: `answerStagedProposal` is called from exactly one
+    // place — the SwiftUI action closures of the answer buttons, by way of
+    // `LiveSessionController.answerPendingProposal`. Nothing the model emits
+    // reaches it: `handle(_:)` above routes model output to the router's tool
+    // dispatch and to the gates' turn observers, never here.
+
+    /// Acts on the proposal whose complete brief is on screen, then tells Iris
+    /// what happened so she acknowledges instead of dispatching again.
+    ///
+    /// The system event is injected only AFTER the outcome is known, because
+    /// its text asserts what the phone has already done. Telling Iris the task
+    /// was sent and only then trying to send it is the one ordering that could
+    /// make her lie.
+    public func answerStagedProposal(
+        _ answer: ProposalAnswer,
+        proposalId: String
+    ) async -> ProposalAnswerOutcome {
+        switch answer {
+        case .yes:
+            let outcome = await router.confirmByUserControl(proposalId: proposalId)
+            await publishPendingProposal()
+            switch outcome {
+            case .dispatched(let runId, let task):
+                track(runId: runId, note: task)
+                notify(.log("Yes button → dispatched \(runId)"))
+                await inject(SystemEvent.userConfirmedByButton(
+                    proposalId: proposalId, runId: runId, userName: userName))
+                return .sent(runId: runId)
+            case .alreadyDispatched(let runId):
+                // Iris was already told by the `started` result she got, or by
+                // the first tap's event. A second notice would make her
+                // acknowledge the same task twice.
+                track(runId: runId)
+                notify(.log("Yes button → \(runId) was already sent; no second dispatch"))
+                return .alreadySent(runId: runId)
+            case .stale:
+                notify(.log("Yes button → that brief is no longer staged; nothing sent"))
+                return .stale
+            case .failed(let message):
+                notify(.log("Yes button → dispatch failed; the brief is still staged"))
+                return .failed(message: message)
+            }
+
+        case .no:
+            guard await router.declineByUserControl(proposalId: proposalId) else {
+                await publishPendingProposal()
+                return .stale
+            }
+            await publishPendingProposal()
+            notify(.log("No button → proposal discarded; nothing sent"))
+            await inject(SystemEvent.userDeclinedByButton(
+                proposalId: proposalId, userName: userName))
+            return .declined
+
+        case .explain:
+            guard await router.isStagedByUserControl(proposalId: proposalId) else { return .stale }
+            // Deliberately no gate change: the proposal stays staged, unsent
+            // and still confirmable, and any amended brief will have to be
+            // staged and confirmed again like every other one.
+            notify(.log("Let me explain → still staged, nothing sent"))
+            await inject(SystemEvent.userWantsToExplainByButton(
+                proposalId: proposalId, userName: userName))
+            return .explaining
+        }
+    }
+
+    /// Tells Iris that a Hermes approval was answered by tapping, so she stops
+    /// asking about it and never calls `approve_hermes_action` for it.
+    /// Called only from the approval buttons' action closures.
+    public func announceApprovalAnswer(
+        runId: String,
+        requestId: String,
+        decision: String,
+        summary: String
+    ) async {
+        notify(.log("approval \(decision) by button → \(runId)"))
+        await inject(SystemEvent.userAnsweredApprovalByButton(
+            runId: runId, requestId: requestId, decision: decision,
+            summary: summary, userName: userName))
+    }
+
+    /// §7's mechanism: a client text turn, role user, `turnComplete: true`.
+    /// The same one every other system event rides on.
+    private func inject(_ text: String) async {
+        guard !closed else { return }
+        modelTurnActive = true
+        modelTranscriptChars = 0
+        notify(.log("→ \(text.prefix(40))"))
+        await transport.sendTextTurn(text, turnComplete: true)
     }
 
     // MARK: Tool calls

@@ -111,6 +111,10 @@ enum VoiceState: Equatable {
 
 struct VoiceOrb: View {
     let state: VoiceState
+    /// Smaller, for the moments when something else on the screen matters
+    /// more than the orb does — a staged brief or a blocked command waiting
+    /// to be read. The state, the colour and the motion are unchanged.
+    var compact: Bool = false
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -121,7 +125,10 @@ struct VoiceOrb: View {
     /// A graphic, not text: it does not grow with Dynamic Type. It *shrinks*
     /// at accessibility sizes, so the larger status line and transcript keep
     /// their room instead of being pushed off the screen.
-    private var size: CGFloat { dynamicTypeSize.isAccessibilitySize ? 150 : 210 }
+    private var size: CGFloat {
+        if compact { return dynamicTypeSize.isAccessibilitySize ? 120 : 150 }
+        return dynamicTypeSize.isAccessibilitySize ? 150 : 210
+    }
 
     var body: some View {
         Button(action: action) {

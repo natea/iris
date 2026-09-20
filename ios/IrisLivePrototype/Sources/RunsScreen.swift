@@ -184,11 +184,13 @@ struct RunsScreen: View {
             RunDetailView(run: run, detail: canned, result: RunProgressFixtures.result(for: run.runId))
         } else {
             RunDetailView(run: run, service: controller.taskClient,
-                          highlightRequestId: controller.pendingOpenRequestId)
+                          highlightRequestId: controller.pendingOpenRequestId,
+                          onAnswered: controller.approvals.onAnswered)
         }
         #else
         RunDetailView(run: run, service: controller.taskClient,
-                      highlightRequestId: controller.pendingOpenRequestId)
+                      highlightRequestId: controller.pendingOpenRequestId,
+                      onAnswered: controller.approvals.onAnswered)
         #endif
     }
 

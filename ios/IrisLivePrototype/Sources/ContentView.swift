@@ -191,8 +191,16 @@ final class LiveSessionController: ObservableObject {
     /// Route + engine diagnostics, polled off the audio engine.
     @Published var audioStatus = AudioStatus()
 
-    /// The staged brief while the dispatch gate waits for the user's answer.
-    @Published var pendingProposal: String?
+    /// The staged proposal while the dispatch gate waits for the user's
+    /// answer. Carries the id, because the on-screen buttons answer for that
+    /// exact brief and nothing else.
+    @Published var pendingProposal: StagedProposal?
+    /// True while a tapped Yes is in flight, so the buttons are disabled and
+    /// the send shows progress rather than inviting a second tap.
+    @Published var isAnsweringProposal = false
+    /// Why the last tapped Yes sent nothing, in plain words. Cleared as soon
+    /// as another answer is attempted or a new proposal is staged.
+    @Published var proposalError = ""
     /// Runs in the pinned Hermes session, desktop-dispatched ones included.
     @Published var runs: [LinkTask] = []
     /// Tool / system-event lines, newest last. Collapsible in the UI.
@@ -506,6 +514,8 @@ final class LiveSessionController: ObservableObject {
         audioBytesReceived = 0
         audioStatus = AudioStatus()
         pendingProposal = nil
+        isAnsweringProposal = false
+        proposalError = ""
         toolLog = []
         announcingRunId = nil
         lastTransportError = ""
@@ -723,8 +733,11 @@ final class LiveSessionController: ObservableObject {
         case .log(let line):
             toolLog.append(line)
             if toolLog.count > 200 { toolLog.removeFirst(toolLog.count - 200) }
-        case .pendingProposal(let brief):
-            pendingProposal = brief
+        case .pendingProposal(let staged):
+            // A different brief on the card is a different question, so a
+            // failure message about the old one must not survive onto it.
+            if staged?.id != pendingProposal?.id { proposalError = "" }
+            pendingProposal = staged
         case .runs(let list):
             runs = list
         case .toolCompleted(let name, _):
@@ -738,6 +751,65 @@ final class LiveSessionController: ObservableObject {
         case .linkError(let error):
             errorText = error.message
             onLinkError?(error)
+        }
+    }
+
+    // MARK: Answering a staged proposal by tapping
+    //
+    // SECURITY INVARIANT: `answerPendingProposal` has exactly one caller — the
+    // SwiftUI action closures of the three answer buttons in `MainView`.
+    // Nothing the model produces can reach it. Live events land in `apply(_:)`
+    // and go to the coordinator; tool calls are executed by the router; push
+    // payloads and deep links land in `PushService` and `PairingController`.
+    // None of those has a path to this method, and it must stay that way.
+
+    /// Yes / No / Let me explain, for the proposal whose complete brief is on
+    /// the card. Barges in first (the user answered, so Iris should stop
+    /// talking), then acts, then lets the coordinator tell Iris what happened.
+    func answerPendingProposal(_ answer: ProposalAnswer) {
+        guard !isAnsweringProposal, let staged = pendingProposal else { return }
+        guard let coordinator else {
+            proposalError = "There is no live session to answer in. Nothing was sent."
+            Haptics.error()
+            return
+        }
+        proposalError = ""
+        // Barge-in: stop the read-back the moment the answer is given. The
+        // injected turn is what tells the server to stop generating; this is
+        // what stops the audio already buffered on the phone.
+        audio.flushPlayback()
+        if answer == .yes { isAnsweringProposal = true }
+        Task { @MainActor [weak self] in
+            let outcome = await coordinator.answerStagedProposal(answer, proposalId: staged.id)
+            guard let self else { return }
+            self.isAnsweringProposal = false
+            switch outcome {
+            case .sent(let runId), .alreadySent(let runId):
+                self.lines.append(.init(speaker: "—", text: "[sent to Hermes: \(runId)]"))
+                Haptics.success()
+            case .declined:
+                self.lines.append(.init(speaker: "—", text: "[not sent — you declined]"))
+                Haptics.tap()
+            case .explaining:
+                self.lines.append(.init(speaker: "—", text: "[still staged — go ahead]"))
+                Haptics.tap()
+            case .stale:
+                self.proposalError = "That was a different request from the one staged now. Nothing was sent."
+                Haptics.error()
+            case .failed(let message):
+                self.proposalError = message
+                Haptics.error()
+            }
+        }
+    }
+
+    /// Tells the running session that an approval was answered by tapping.
+    /// Silent when nothing is live — there is no one to tell.
+    func announceApprovalAnswer(runId: String, requestId: String, decision: String, summary: String) {
+        guard isRunning, let coordinator else { return }
+        Task {
+            await coordinator.announceApprovalAnswer(
+                runId: runId, requestId: requestId, decision: decision, summary: summary)
         }
     }
 
@@ -897,6 +969,14 @@ struct ContentView: View {
             // A completion Iris just spoke should not also buzz.
             controller.onRunAnnounced = { [runs] runId in
                 runs.notifier.markHandled(runId)
+            }
+            // An approval answered by tapping is told to the live session, so
+            // Iris stops asking about it and never calls approve_hermes_action
+            // for it. Nothing is said when no session is running.
+            runs.approvals.onAnswered = { [controller] runId, requestId, decision, summary in
+                controller.announceApprovalAnswer(
+                    runId: runId, requestId: requestId,
+                    decision: decision.rawValue, summary: summary)
             }
             controller.onVoiceRejected = { [voiceStore, pairing] in
                 voiceStore.fallBackToMacDefault(macDefault: pairing.status?.defaultVoice ?? "")

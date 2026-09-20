@@ -222,3 +222,17 @@ test("buildMobilePreviewConfig includes the configured accent instruction", () =
   const withoutAccent = buildMobilePreviewConfig({ voice: "Zephyr" });
   assert.equal(withoutAccent.systemInstruction.parts[0].text.includes("Voice accent rule"), false);
 });
+
+test("the mobile prompt explains the on-screen answer buttons and that the model cannot press them", async () => {
+  const { buildMobileSystemInstructionText } = await import("../electron/mobileSession.mjs");
+  const text = buildMobileSystemInstructionText({ userName: "Nate" });
+  for (const name of [
+    "SYSTEM_EVENT_USER_CONFIRMED_BY_BUTTON",
+    "SYSTEM_EVENT_USER_DECLINED_BY_BUTTON",
+    "SYSTEM_EVENT_USER_WANTS_TO_EXPLAIN",
+    "SYSTEM_EVENT_USER_APPROVED_BY_BUTTON",
+    "SYSTEM_EVENT_USER_DENIED_BY_BUTTON",
+  ]) assert.ok(text.includes(name), name);
+  assert.match(text, /do NOT call submit_hermes_task/);
+  assert.match(text, /never press these buttons yourself/);
+});

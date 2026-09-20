@@ -62,6 +62,8 @@ struct PreviewFixture {
         case "speaking":  return .speaking
         case "working":   return .working
         case "proposal":  return .proposal
+        case "proposal-long": return .proposalLong
+        case "approval-long": return .approvalLong
         case "error":     return .errored
         case "reconnecting": return .reconnecting
         case "voices":    return .voices
@@ -120,6 +122,64 @@ struct PreviewFixture {
         state: .awaitingAnswer,
         lines: conversation,
         pendingProposal: "Ask Hermes to re-run the dependency audit across the workspace and write up anything pinned more than two majors behind.",
+        pairedName: "Nate's MacBook Pro"
+    )
+
+    /// A brief long enough that it cannot all fit on the card — the case the
+    /// answer buttons make dangerous if the text is ever truncated. The card
+    /// scrolls; nothing is hidden behind an ellipsis.
+    static let proposalLong = PreviewFixture(
+        state: .awaitingAnswer,
+        lines: conversation,
+        pendingProposal: """
+            Goal:
+            Re-run the dependency audit across every package in the workspace and write up anything pinned more than two majors behind.
+
+            User-provided context:
+            The 0.4 release goes out on Friday, so anything that needs a migration has to be found today. The audit last ran in June and the lockfile has changed twice since.
+
+            Constraints:
+            - Do not change any file; this is a read-only audit.
+            - Ignore devDependencies for now.
+            - Stop and ask before running anything that touches the network.
+
+            Acceptance criteria:
+            - Every package with a major-version gap of two or more is listed.
+            - Each entry says which package pins it and what the current version is.
+
+            Expected output:
+            A markdown table, newest gaps first, followed by a short paragraph on the three worst.
+            """,
+        pairedName: "Nate's MacBook Pro"
+    )
+
+    /// The other side of the same rule: an approval whose command is far too
+    /// long to take on trust from a glance.
+    static let approvalLong = PreviewFixture(
+        state: .working(1),
+        lines: conversation,
+        runs: [
+            LinkTask(
+                runId: "run-long-approval",
+                task: "Goal: Prune the release artifacts before the 0.4 build.",
+                status: "running", origin: "device:abc",
+                createdAt: Date().addingTimeInterval(-300).timeIntervalSince1970,
+                updatedAt: Date().addingTimeInterval(-6).timeIntervalSince1970,
+                headline: "Waiting for you", stepCount: 2,
+                pendingApproval: PendingApproval(
+                    requestId: "approval:longcmd",
+                    summary: """
+                        Hermes wants to run:
+                        find /Users/nate/Documents/code/iris/release -type f \\
+                          \\( -name '*.dmg' -o -name '*.zip' -o -name '*.blockmap' \\) \\
+                          -mtime +14 -print -delete \\
+                          && rm -rf /Users/nate/Documents/code/iris/dist/mac-arm64 \\
+                          && npm run clean:artifacts -- --yes --keep-latest=2
+                        """,
+                    canApproveFromPhone: true
+                )
+            )
+        ],
         pairedName: "Nate's MacBook Pro"
     )
 

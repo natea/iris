@@ -205,6 +205,77 @@ public struct DispatchGate: Sendable, Equatable {
         return .success(current)
     }
 
+    // MARK: Confirmation by an explicit on-screen control
+
+    // ========================================================================
+    // SECURITY INVARIANT — READ BEFORE CHANGING ANYTHING BELOW
+    //
+    // `claimByUserControl` and `restoreAfterUserControlDispatchFailed` exist
+    // for ONE caller: the SwiftUI button closures on the pending-proposal card
+    // (MainView → LiveSessionController.answerPendingProposal →
+    // SessionCoordinator.answerStagedProposal → ToolRouter.confirmByUserControl).
+    //
+    // NOTHING the model emits may ever reach them. The model's only entry into
+    // this file is `ToolRouter.execute`, which switches on the eight declared
+    // tool names and maps `submit_hermes_task` to `claim` — never to this. A
+    // transcript line, a system event, a push payload and a deep link are all
+    // inert here for the same reason: none of them is a tool call, and none of
+    // them has a path to the SwiftUI action closure either.
+    //
+    // WHY THIS IS NOT A HOLE IN THE TWO-STEP RULE (spec: "Confirmation by an
+    // explicit control"). The voice path needs `stage == awaiting_user` and a
+    // distinct user turn because that ordering is the only evidence the phone
+    // has that the complete brief was HEARD. A tap carries its own, better
+    // evidence: the complete brief is on screen, on a trusted surface, at the
+    // moment of the tap. So read-back progress is deliberately NOT required —
+    // tapping Yes while Iris is still reading it out is valid — but identity
+    // still is: the id must be the one currently staged, and the session must
+    // match. A tap for a brief that is no longer staged dispatches nothing.
+    // ========================================================================
+
+    /// Consumes the staged proposal on the authority of a deliberate tap on
+    /// the trusted surface that is showing the complete brief.
+    ///
+    /// Only callable from the UI action closures. See the invariant above.
+    @discardableResult
+    public mutating func claimByUserControl(
+        proposalId: String,
+        sessionId: String = "",
+        now: Date = Date()
+    ) -> Result<Proposal, Reason> {
+        expire(now)
+        guard let current = proposal else { return .failure(.noProposal) }
+        guard !proposalId.isEmpty, proposalId == current.id else { return .failure(.proposalMismatch) }
+        if !current.sessionId.isEmpty && sessionId != current.sessionId {
+            return .failure(.sessionMismatch)
+        }
+        // No stage or turn check: the tap IS the confirmation, and the brief it
+        // confirms is the one on screen. Every other identity rule still holds.
+        proposal = nil
+        return .success(current)
+    }
+
+    /// Puts back a proposal that a tap claimed but that could not be
+    /// dispatched, so the card stays up and the user can try again.
+    ///
+    /// Restores the exact value that was claimed — same id, same stage, same
+    /// `userTurnObserved` — so a failed send neither strengthens nor weakens
+    /// the model's own claim rules. Refused when anything newer has been
+    /// staged in the meantime: the newest brief is the only one on screen.
+    ///
+    /// Only callable from the UI action path. See the invariant above.
+    @discardableResult
+    public mutating func restoreAfterUserControlDispatchFailed(
+        _ claimed: Proposal,
+        now: Date = Date()
+    ) -> Bool {
+        expire(now)
+        guard proposal == nil else { return false }
+        guard now.timeIntervalSince(claimed.proposedAt) <= Self.proposalTTL else { return false }
+        proposal = claimed
+        return true
+    }
+
     // MARK: Contract wording (LINK_API.md §6.4)
 
     /// The `error` string `submit_hermes_task` must return for a rejection.

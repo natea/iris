@@ -16,11 +16,19 @@
 //  It is also where a pending approval is answered (§11.5). That path is
 //  deliberately different from the spoken one: the dispatch gate in §6 exists
 //  because a model can mishear a person, and nothing here goes through it,
-//  because nothing here is heard. An approval is sent only when a finger taps
-//  Approve or Deny and then confirms a dialog that restates the command
-//  verbatim. There is no code path from a tool call, a transcript, a push, or
-//  any other model output to `resolve(_:)` — the model cannot reach this
-//  screen's buttons, and the buttons are the only caller.
+//  because nothing here is heard. There is no code path from a tool call, a
+//  transcript, a push, or any other model output to `resolve(_:_:)` — the
+//  model cannot reach this screen's buttons, and the buttons are its only
+//  caller.
+//
+//  WHERE THE TAP COUNT COMES FROM. Approve (= allow ONCE) and Deny are single
+//  big taps in the thumb zone, because the complete command is on screen above
+//  them: showing the request in full IS the trusted-surface condition, and a
+//  dialog that restates what is already visible buys nothing but a second
+//  chance to mis-hit. "Allow for this session" and "Always allow" are
+//  different in kind — they authorize commands that do not exist yet and that
+//  nobody can have read — so they stay behind a smaller "More options…"
+//  control WITH a confirmation.
 //
 
 import SwiftUI
@@ -35,9 +43,16 @@ final class RunDetailController: ObservableObject {
     @Published private(set) var result: String?
     @Published private(set) var isStopping = false
     @Published var message = ""
-    /// Set while an approval is being sent, so the buttons cannot be tapped
-    /// twice into two decisions.
-    @Published private(set) var isResolving = false
+    /// The shared answering path: exactly-once, staleness and `409` live
+    /// there, so this screen and the main screen cannot drift apart.
+    let answerer = ApprovalAnswerer()
+
+    /// Which decision is travelling right now, so the button that was pressed
+    /// shows the progress and every button is blocked. Republished here rather
+    /// than observed on `answerer`, because SwiftUI only observes the object
+    /// the view actually holds.
+    @Published private(set) var sending: ApprovalDecision?
+    var isResolving: Bool { sending != nil }
     /// What the last approval did, in plain words. Never a claim that a
     /// decision landed when it did not.
     @Published var approvalOutcome = ""
@@ -151,32 +166,42 @@ final class RunDetailController: ObservableObject {
         }
     }
 
-    /// The ONLY caller is the confirmed Approve/Deny button in this screen.
-    /// §4: this route resolves the approval exactly as the desktop's own
-    /// buttons do, so the human gate is the phone's responsibility — here it
-    /// is a deliberate tap plus a confirmation that restates the command.
-    func resolve(_ decision: ApprovalDecision) async {
-        guard let service, !isResolving else { return }
-        isResolving = true
-        defer { isResolving = false }
-        do {
-            try await service.resolveApproval(runId: runId, decision: decision.rawValue)
-            approvalOutcome = decision.isDenial
-                ? "Denied. Hermes has been told no."
-                : "Approved (\(decision.rawValue)). Hermes is carrying on."
+    /// The ONLY callers are this screen's Approve / Deny buttons and its
+    /// confirmed broader grants. §4: this route resolves the approval exactly
+    /// as the desktop's own buttons do, so the human gate is the phone's
+    /// responsibility — here it is a deliberate tap on a screen showing the
+    /// complete request, plus a confirmation for the grants that authorize
+    /// commands nobody has read yet.
+    ///
+    /// The request the tap belonged to is passed in, not read from state: by
+    /// the time this runs, the poll may have moved the run on to a different
+    /// question, and that one must not be answered by this tap.
+    func resolve(_ decision: ApprovalDecision, approval: PendingApproval) async {
+        guard sending == nil else { return }
+        sending = decision
+        defer { sending = nil }
+        let outcome = await answerer.answer(
+            decision,
+            approval: approval,
+            runId: runId,
+            currentRequestId: pendingApproval?.requestId,
+            service: service
+        )
+        switch outcome {
+        case .answered, .alreadyAnswered:
+            approvalOutcome = outcome.message
             message = ""
-            await fetchOnce()
-        } catch LinkError.approvalNotPending {
+            Haptics.success()
+        case .stale, .notPending:
             approvalOutcome = ""
-            message = "Hermes has no pending approval for this run any more — it was already answered on the Mac, or it timed out."
-            await fetchOnce()
-        } catch let error as LinkError {
+            message = outcome.message
+            Haptics.error()
+        case .failed:
             approvalOutcome = ""
-            message = error.message
-        } catch {
-            approvalOutcome = ""
-            message = "Could not send that decision to Hermes."
+            message = outcome.message
+            Haptics.error()
         }
+        await fetchOnce()
     }
 
     func stop() async {
@@ -224,6 +249,11 @@ struct RunDetailView: View {
     /// while these are nil, and only a tap can set them.
     @State private var confirmApproval: PendingApproval?
     @State private var confirmDenial: PendingApproval?
+    @AppStorage(Handedness.storageKey) private var handednessSetting = Handedness.right.rawValue
+
+    private var handedness: Handedness {
+        Handedness(rawValue: handednessSetting) ?? .right
+    }
 
     /// nil in every production path; set only by a DEBUG fixture.
     private let injected: LinkTaskDetail?
@@ -232,14 +262,23 @@ struct RunDetailView: View {
     /// `highlightRequestId` is the request a `needs_attention` push named. It
     /// is used only to confirm the card on screen is the one the notification
     /// was about; a mismatch is reported rather than silently answered.
-    init(run: LinkTask, service: LinkTaskService?, highlightRequestId: String? = nil) {
+    init(
+        run: LinkTask,
+        service: LinkTaskService?,
+        highlightRequestId: String? = nil,
+        onAnswered: ApprovalAnsweredHandler? = nil
+    ) {
         _controller = StateObject(wrappedValue: RunDetailController(seed: run, service: service))
         injected = nil
         injectedResult = nil
         self.highlightRequestId = highlightRequestId
+        self.onAnswered = onAnswered
     }
 
     private let highlightRequestId: String?
+    /// Raised after a decision really reached the Mac, so a live session can
+    /// be told. nil when there is no session to tell.
+    private var onAnswered: ApprovalAnsweredHandler?
 
     #if DEBUG
     init(run: LinkTask, detail: LinkTaskDetail, result: String? = nil) {
@@ -247,6 +286,7 @@ struct RunDetailView: View {
         injected = detail
         injectedResult = result
         self.highlightRequestId = nil
+        self.onAnswered = nil
     }
     #endif
 
@@ -278,6 +318,9 @@ struct RunDetailView: View {
         // the bottom for debugging.
         .navigationTitle(RunTitle.summary(of: controller.seed.task))
         .navigationBarTitleDisplayMode(.inline)
+        // Pinned above the safe area rather than left in the list: a question
+        // Hermes is blocked on must be answerable without scrolling for it.
+        .safeAreaInset(edge: .bottom) { approvalButtons }
         .toolbar { toolbarContent }
         .task(id: controller.runId) {
             if injected == nil { await controller.poll() }
@@ -286,6 +329,7 @@ struct RunDetailView: View {
             if phase == .active { controller.resynchronize() }
         }
         .onAppear {
+            controller.answerer.onAnswered = onAnswered
             #if DEBUG
             if let injected { controller._previewSeed(injected, result: injectedResult) }
             #endif
@@ -314,26 +358,76 @@ struct RunDetailView: View {
             ForEach(ApprovalDecision.allCases.filter { !$0.isDenial }, id: \.rawValue) { decision in
                 Button(decision.buttonTitle) {
                     confirmApproval = nil
-                    Task { await controller.resolve(decision) }
+                    Task { await controller.resolve(decision, approval: approval) }
                 }
             }
             Button("Cancel", role: .cancel) { confirmApproval = nil }
         } message: { approval in
-            Text(approval.summary)
+            // The command again, and what the broader grants would mean for
+            // commands that have not been written yet.
+            Text("\(approval.summary)\n\n\(ApprovalDecision.session.consequence)")
         }
         .confirmationDialog(
             "Deny this?",
             isPresented: Binding(get: { confirmDenial != nil }, set: { if !$0 { confirmDenial = nil } }),
             titleVisibility: .visible,
             presenting: confirmDenial
-        ) { _ in
+        ) { approval in
             Button("Deny", role: .destructive) {
                 confirmDenial = nil
-                Task { await controller.resolve(.deny) }
+                Task { await controller.resolve(.deny, approval: approval) }
             }
             Button("Cancel", role: .cancel) { confirmDenial = nil }
         } message: { approval in
             Text(approval.summary)
+        }
+    }
+
+    // MARK: The approval buttons (LINK_API.md §11.5)
+
+    /// SECURITY INVARIANT: these two closures, and the confirmed grants in the
+    /// "More options…" dialog, are the ONLY callers of `controller.resolve`.
+    /// No tool call, transcript line, system event or push payload can reach
+    /// them — a push can put this screen in front of the user, and that is
+    /// all. The model's own route to an approval is `approve_hermes_action`,
+    /// which still goes through `ApprovalGate` and is untouched by this.
+    ///
+    /// Approve here means ALLOW ONCE: it answers the command shown in full,
+    /// just above, so the tap is the whole gate. The grants that authorize
+    /// commands nobody has read yet are not on these buttons.
+    @ViewBuilder
+    private var approvalButtons: some View {
+        if let approval = controller.pendingApproval, approval.canApproveFromPhone {
+            AnswerButtonBar(
+                affirmative: AnswerAction(
+                    id: "run-approve",
+                    title: "Approve",
+                    symbol: "checkmark.shield.fill",
+                    role: .affirmative,
+                    accessibilityLabel: "Approve: \(RunTitle.summary(of: approval.summary))",
+                    accessibilityHint: "Lets Hermes run this one command",
+                    isBusy: controller.sending == .once
+                ) {
+                    Task { await controller.resolve(.once, approval: approval) }
+                },
+                negative: AnswerAction(
+                    id: "run-deny",
+                    title: "Deny",
+                    symbol: "xmark.shield.fill",
+                    role: .negative,
+                    accessibilityLabel: "Deny",
+                    accessibilityHint: "Tells Hermes no",
+                    isBusy: controller.sending == .deny
+                ) {
+                    Task { await controller.resolve(.deny, approval: approval) }
+                },
+                handedness: handedness,
+                isDisabled: controller.isResolving
+            )
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+            .background(.bar)
         }
     }
 
@@ -348,27 +442,48 @@ struct RunDetailView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.orange)
 
-                    // Hermes' own words, shown and never followed.
-                    Text(approval.summary)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
+                    // Hermes' own words, shown and never followed. Monospaced
+                    // because these are usually commands, where a space or a
+                    // slash in the wrong place changes what runs — and bounded
+                    // rather than clipped, because nobody may approve text
+                    // they cannot see.
+                    ScrollView(.vertical) {
+                        Text(approval.summary)
+                            .font(.callout.monospaced())
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 220)
+                    .scrollBounceBehavior(.basedOnSize)
+                    .accessibilityIdentifier("approval-summary")
 
                     if approval.canApproveFromPhone {
-                        Text("Answering here does exactly what the buttons in Iris on your Mac do.")
+                        Text("Answering here does exactly what the buttons in Iris on your Mac do. The buttons are at the bottom of the screen.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        HStack(spacing: 10) {
-                            Button("Approve…") { confirmApproval = approval }
-                                .buttonStyle(.borderedProminent)
-                            Button("Deny…", role: .destructive) { confirmDenial = approval }
-                                .buttonStyle(.bordered)
-                            if controller.isResolving { ProgressView().controlSize(.mini) }
+                        // The broader grants keep their confirmation: they
+                        // authorize commands that do not exist yet, which is
+                        // precisely what a single tap must not do.
+                        Button {
+                            confirmApproval = approval
+                        } label: {
+                            Text("More options…")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(Color.accentColor)
+                                // A text-sized target in a list row is easy to
+                                // miss; this gives it a real one without
+                                // making it look like a second big button.
+                                .padding(.vertical, 8)
+                                .padding(.trailing, 24)
+                                .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                         .disabled(controller.isResolving)
-                        .padding(.top, 2)
+                        .accessibilityIdentifier("approval-more-options")
+                        .accessibilityHint("Allow for this session, or always")
                     } else {
                         // §4: clarifications, sudo and secrets travel over
                         // Hermes' interactive socket, which Link does not
@@ -390,7 +505,10 @@ struct RunDetailView: View {
                     }
                 }
                 .padding(.vertical, 4)
-                .accessibilityElement(children: .combine)
+                // `.contain`, not `.combine`: the command has to stay an
+                // element of its own so VoiceOver can read it line by line
+                // and so a test can assert it is on screen verbatim.
+                .accessibilityElement(children: .contain)
                 .accessibilityLabel("Hermes is waiting for you. \(approval.summary)")
             }
         } else if !controller.approvalOutcome.isEmpty {

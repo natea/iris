@@ -116,14 +116,18 @@ final class PendingApprovalUITests: XCTestCase {
         let card = app.staticTexts["Hermes wants to run: rm -rf build"]
         XCTAssertTrue(card.waitForExistence(timeout: 15), "the summary must be on screen, verbatim")
 
-        let approve = app.buttons["Approve…"]
-        XCTAssertTrue(approve.exists)
-        XCTAssertTrue(app.buttons["Deny…"].exists)
+        // The single-tap answers are the big ones in the thumb zone.
+        XCTAssertTrue(app.buttons["run-approve"].exists)
+        XCTAssertTrue(app.buttons["run-deny"].exists)
 
-        // Nothing is sent by the first tap: it opens a confirmation that
-        // restates the command, and the decision is only made there.
-        approve.tap()
-        XCTAssertTrue(app.buttons["Allow once"].waitForExistence(timeout: 5))
+        // The BROADER grants keep their confirmation, because they authorize
+        // commands that do not exist yet: nothing is sent by this first tap,
+        // it opens a dialog that restates the command.
+        let more = app.buttons["approval-more-options"]
+        XCTAssertTrue(more.exists)
+        more.tap()
+        if !app.buttons["Allow once"].waitForExistence(timeout: 6) { more.tap() }
+        XCTAssertTrue(app.buttons["Allow once"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Always allow"].exists)
         XCTAssertTrue(app.buttons["Allow for this session"].exists)
         // The confirmation restates the command, so nobody approves something
@@ -154,8 +158,8 @@ final class PendingApprovalUITests: XCTestCase {
             NSPredicate(format: "label CONTAINS[c] 'answered in Iris on your Mac'")
         ).firstMatch
         XCTAssertTrue(notice.waitForExistence(timeout: 15))
-        XCTAssertFalse(app.buttons["Approve…"].exists, "nothing here may be approved from the phone")
-        XCTAssertFalse(app.buttons["Deny…"].exists)
+        XCTAssertFalse(app.buttons["run-approve"].exists, "nothing here may be approved from the phone")
+        XCTAssertFalse(app.buttons["run-deny"].exists)
     }
 
     /// The marker has to be in the list too: a run that needs an answer must

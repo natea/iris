@@ -102,6 +102,47 @@ final class RunsController: ObservableObject {
         }
     }
 
+    // MARK: Answering an approval from the main screen
+    //
+    // SECURITY INVARIANT: `answerApproval` is called from the main screen's
+    // Approve / Deny button closures and from nowhere else. The exactly-once,
+    // staleness and `409` rules all live in `ApprovalAnswerer`, shared with
+    // the run-detail screen so the two cannot drift.
+
+    let approvals = ApprovalAnswerer()
+    /// Which decision is in flight, for the progress on the pressed button.
+    @Published private(set) var sendingApproval: ApprovalDecision?
+    /// The plain-language result of the last answer given from the main
+    /// screen. Never a claim that something landed when it did not.
+    @Published var approvalMessage = ""
+
+    /// The one thing on the main screen worth interrupting for: a run of this
+    /// device's that Hermes is blocked on, and that this phone can answer.
+    var approvableRun: LinkTask? {
+        runs.first {
+            !$0.isTerminal && ($0.pendingApproval?.canApproveFromPhone ?? false)
+        }
+    }
+
+    func answerApproval(_ decision: ApprovalDecision, approval: PendingApproval, runId: String) async {
+        guard sendingApproval == nil else { return }
+        sendingApproval = decision
+        defer { sendingApproval = nil }
+        // The live list is the only honest answer to "what is it waiting on
+        // NOW"; a tap for anything else is refused rather than redirected.
+        let current = runs.first { $0.runId == runId }?.pendingApproval?.requestId
+        let outcome = await approvals.answer(
+            decision, approval: approval, runId: runId,
+            currentRequestId: current, service: taskClient
+        )
+        approvalMessage = outcome.message
+        switch outcome {
+        case .answered, .alreadyAnswered: Haptics.success()
+        default: Haptics.error()
+        }
+        await refresh(notifying: false)
+    }
+
     func stop(_ run: LinkTask) async {
         guard let client else { return }
         do {
