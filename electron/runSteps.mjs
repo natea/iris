@@ -195,6 +195,43 @@ function eventMillis(event, fallback) {
  * a step id (`"s12"`). Both are drawn from one per-run counter, so a step id
  * is a valid cursor position. Anything else means "give me everything".
  */
+/**
+ * Steps for a FINISHED run, rebuilt from Hermes' saved transcript. Live steps
+ * live in memory only — gone after a restart or ten minutes after the run ends
+ * — but the transcript keeps every tool call, so a finished run need never say
+ * "no step history". The transcript has no durations, and we do not invent
+ * them: `duration_ms` stays null and the status is simply "done".
+ */
+export function snapshotFromHistory(historySteps, { limit = 60 } = {}) {
+  const all = Array.isArray(historySteps) ? historySteps.filter((step) => step && step.tool) : [];
+  const kept = all.slice(-limit);
+  const steps = kept.map((step, position) => {
+    const tool = String(step.tool);
+    const preview = sanitizePreview(step.preview || "");
+    const index = position + 1;
+    return {
+      id: `s${index}`,
+      index,
+      tool,
+      category: toolCategory(tool),
+      label: stepDetail({ tool, preview }),
+      preview,
+      status: "done",
+      started_at: Number(step.ts) > 0 ? Number(step.ts) : 0,
+      duration_ms: null,
+    };
+  });
+  return {
+    headline: "",
+    step_count: steps.length,
+    steps,
+    steps_cursor: steps.length,
+    steps_complete: all.length <= limit,
+    steps_truncated: all.length > limit,
+    steps_source: "transcript",
+  };
+}
+
 export function parseStepsSince(raw) {
   if (raw === undefined || raw === null || raw === "") return null;
   const text = String(raw).trim();

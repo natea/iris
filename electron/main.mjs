@@ -71,7 +71,7 @@ import { createApnsClient, resolveApnsConfig } from "./apnsClient.mjs";
 import { createPushNotifier } from "./pushNotifier.mjs";
 import { createLiveActivityNotifier } from "./liveActivityNotifier.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
-import { createRunSteps, parseStepsSince } from "./runSteps.mjs";
+import { createRunSteps, parseStepsSince, snapshotFromHistory } from "./runSteps.mjs";
 import {
   GEMINI_VOICES,
   accentInstruction,
@@ -1485,6 +1485,27 @@ async function sessionRunsFromTranscript(sessionId) {
   }
   if (current?.output) runs.push(current);
   return runs;
+}
+
+// Finished runs are immutable, so a rebuilt step list is cached for good.
+const historyStepCache = new Map();
+
+async function historyStepsForRun(entry) {
+  const runId = String(entry?.runId || "");
+  if (!runId) return null;
+  if (historyStepCache.has(runId)) return historyStepCache.get(runId);
+  const wanted = String(entry.task || "").toLowerCase().trim();
+  if (!wanted || !entry.sessionId) return null;
+  const runs = await sessionRunsFromTranscript(entry.sessionId);
+  // The same brief can be dispatched twice; take the one nearest in time.
+  const candidates = runs.filter((run) => String(run.task || "").toLowerCase().trim() === wanted);
+  if (!candidates.length) return null;
+  const when = Number(entry.updatedAt) || 0;
+  candidates.sort((a, b) => Math.abs((a.updatedAt || 0) - when) - Math.abs((b.updatedAt || 0) - when));
+  const snapshot = snapshotFromHistory(candidates[0].steps);
+  if (historyStepCache.size > 200) historyStepCache.delete(historyStepCache.keys().next().value);
+  historyStepCache.set(runId, snapshot);
+  return snapshot;
 }
 
 async function fetchHermesHistory() {
@@ -4219,7 +4240,14 @@ async function startIrisLink() {
         // restart mid-run the in-memory steps are gone: the snapshot says so
         // with `steps_complete: false` and an empty list rather than
         // implying the run did nothing.
-        const progress = runSteps.snapshot(runId, { since: parseStepsSince(stepsSince) });
+        let progress = runSteps.snapshot(runId, { since: parseStepsSince(stepsSince) });
+        const finished = TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase());
+        if (finished && progress.step_count === 0) {
+          // Nothing in memory (restart, or evicted after the run ended): the
+          // saved transcript still has every tool call this run made.
+          const restored = await historyStepsForRun(entry).catch(() => null);
+          if (restored) progress = restored;
+        }
         return { ...linkTaskSummary(entry), ...status, ...progress, run_id: runId };
       },
       result: async ({ runId }) => {

@@ -337,3 +337,25 @@ test("the accumulator's headline matches what the desktop card would render", ()
     );
   }
 });
+
+test("a finished run's steps can be rebuilt from the transcript without inventing durations", async () => {
+  const { snapshotFromHistory } = await import("../electron/runSteps.mjs");
+  const snapshot = snapshotFromHistory([
+    { id: "hist-1-0", tool: "terminal", preview: "calibredb search author:Forte", status: "done", ts: 1789871730000 },
+    { id: "hist-2-0", tool: "browser_exec", preview: "token=sk-abcdefghijklmnopqrstuvwxyz123456", status: "done", ts: 0 },
+    { tool: "" },
+  ]);
+  assert.equal(snapshot.step_count, 2);
+  assert.equal(snapshot.steps_complete, true);
+  assert.equal(snapshot.steps_source, "transcript");
+  assert.deepEqual(snapshot.steps.map((step) => [step.id, step.index, step.status, step.duration_ms]), [
+    ["s1", 1, "done", null],
+    ["s2", 2, "done", null],
+  ]);
+  assert.equal(snapshot.steps[0].started_at, 1789871730000);
+  assert.doesNotMatch(JSON.stringify(snapshot), /sk-abcdefghijklmnop/);
+  const many = snapshotFromHistory(Array.from({ length: 70 }, (_, i) => ({ tool: "terminal", preview: String(i) })));
+  assert.equal(many.step_count, 60);
+  assert.equal(many.steps_truncated, true);
+  assert.equal(many.steps_complete, false);
+});
