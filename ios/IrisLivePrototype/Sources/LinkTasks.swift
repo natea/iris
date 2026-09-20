@@ -227,6 +227,11 @@ public protocol LinkTaskService: Sendable {
     func dispatchTask(task: String, urgency: String) async throws -> LinkDispatchResult
     func listTasks(undelivered: Bool) async throws -> [LinkTask]
     func taskStatus(runId: String) async throws -> LinkTaskStatus
+    /// A REQUIREMENT, not just an extension method. Callers hold this protocol
+    /// as an existential; a method that exists only in an extension is
+    /// statically dispatched to the extension's default, so `LinkClient`'s real
+    /// implementation was never called and the phone never asked for steps.
+    func taskStatus(runId: String, stepsSince: Int?) async throws -> LinkTaskDetail
     func taskResult(runId: String) async throws -> LinkTaskResult
     func stopTask(runId: String) async throws -> String
     func resolveApproval(runId: String, decision: String) async throws
