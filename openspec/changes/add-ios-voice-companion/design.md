@@ -84,6 +84,8 @@ This is a file-read endpoint on a network service, so it is deliberately narrow.
 
 The model's side matters as much: the mobile prompt tells Iris that a file is handed over by Hermes naming it in its result, and that she must say where it is — "it's on the run in your Runs list" — rather than claiming it was sent somewhere she cannot verify.
 
+**Iris Link is the baseline; other destinations are optional extras.** An Obsidian vault is an obvious second route — Iris already knows the vault path from the brain feature, and Obsidian Sync would carry a saved file to the phone even when the Mac is unreachable, where notes can link to it. It cannot be the only route: it needs Obsidian, a Sync subscription, and the mobile app open to pull, and Iris cannot observe whether the sync happened. So delivery over Link must work for someone who has never heard of Obsidian, a vault copy is offered only when a vault is configured, and what Iris says follows what she can verify — "it's on the run in your Runs list" for Link, "I saved a copy to your vault" for Obsidian, never "it's on your phone" on the strength of a sync she cannot see.
+
 ### 7. Siri and Shortcuts are an entry point, not a second voice channel
 
 Siri can start Iris and hand it a line of text. It cannot hand over the conversation. Apple's speech pipeline delivers a transcribed `String` to an `AppIntent`; no App Intents or SiriKit API hands a third-party app the live microphone stream (an absence-of-API finding — Apple documents no such mechanism rather than stating the negative). So the design treats Siri as an *ignition key*: "Hey Siri, start an Iris session" or "Hey Siri, send a task to Iris", after which Iris's own Live session owns the microphone.
