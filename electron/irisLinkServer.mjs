@@ -392,6 +392,107 @@ export function createIrisLinkServer({
     sendJson(res, 200, { ok: true, pushEnabled: true, environment: result.environment });
   }
 
+  // ===== Live Activity tokens =====
+  //
+  // Two registrations, deliberately separate routes because they are two
+  // different capabilities with two different lifetimes (LINK_API.md §14):
+  // the per-device push-to-start token, and the per-activity update token.
+  // Neither is ever returned by any route, and revoking the device deletes
+  // both along with its credential.
+  function handleLiveActivityRegister(res, device, body) {
+    const payload = parseJsonBody(res, body);
+    if (!payload) return;
+    if (typeof pairingStore.setLiveActivityToken !== "function") {
+      sendJson(res, 501, { error: "push_unavailable" });
+      return;
+    }
+    const result = pairingStore.setLiveActivityToken(device.id, {
+      activityId: payload.activity_id,
+      token: payload.token,
+      environment: payload.environment,
+    });
+    if (!result?.ok) {
+      const code = String(result?.error || "invalid_token");
+      sendJson(res, code === "unknown_device" ? 401 : 400, { error: code });
+      return;
+    }
+    logEvent("info", "Iris Link registered a Live Activity update token.", { deviceId: device.id });
+    sendJson(res, 200, { ok: true, activity_id: result.activityId, liveActivityEnabled: true });
+  }
+
+  function handleLiveActivityUnregister(res, device, rawQuery) {
+    if (typeof pairingStore.clearLiveActivityToken !== "function") {
+      sendJson(res, 501, { error: "push_unavailable" });
+      return;
+    }
+    // No `activity_id` means "all of them": the user turned Live Activities
+    // off and the Mac must stop pushing to every one it holds.
+    const activityId = new URLSearchParams(rawQuery || "").get("activity_id") || "";
+    const result = pairingStore.clearLiveActivityToken(device.id, activityId);
+    if (!result?.ok) {
+      const code = String(result?.error || "unknown_device");
+      sendJson(res, code === "unknown_device" ? 401 : 400, { error: code });
+      return;
+    }
+    sendJson(res, 200, { ok: true, liveActivityEnabled: false });
+  }
+
+  function handlePushToStartRegister(res, device, body) {
+    const payload = parseJsonBody(res, body);
+    if (!payload) return;
+    if (typeof pairingStore.setLiveActivityStartToken !== "function") {
+      sendJson(res, 501, { error: "push_unavailable" });
+      return;
+    }
+    const result = pairingStore.setLiveActivityStartToken(device.id, {
+      token: payload.token,
+      environment: payload.environment,
+    });
+    if (!result?.ok) {
+      const code = String(result?.error || "invalid_token");
+      sendJson(res, code === "unknown_device" ? 401 : 400, { error: code });
+      return;
+    }
+    logEvent("info", "Iris Link registered a push-to-start token.", { deviceId: device.id });
+    sendJson(res, 200, { ok: true, pushToStartEnabled: true, environment: result.environment });
+  }
+
+  function handlePushToStartUnregister(res, device) {
+    if (typeof pairingStore.clearLiveActivityStartToken !== "function") {
+      sendJson(res, 501, { error: "push_unavailable" });
+      return;
+    }
+    const result = pairingStore.clearLiveActivityStartToken(device.id);
+    if (!result?.ok) {
+      sendJson(res, 401, { error: "not_paired" });
+      return;
+    }
+    sendJson(res, 200, { ok: true, pushToStartEnabled: false });
+  }
+
+  // The home-screen widget's timeline provider calls this and nothing else:
+  // counts, two titles and a reachability flag. No step lists, no result text,
+  // no output — a widget is a glance, and iOS will refresh it on its own
+  // budget whatever we would like.
+  async function handleSummary(res, device) {
+    const handler = tasks?.summary;
+    if (typeof handler !== "function") {
+      sendJson(res, 501, { error: "tasks_unavailable" });
+      return;
+    }
+    const summary = (await handler({ deviceId: device.id })) || {};
+    const info = getInfo() || {};
+    sendJson(res, 200, {
+      active_count: Number(summary.active_count) || 0,
+      waiting_count: Number(summary.waiting_count) || 0,
+      finished_today_count: Number(summary.finished_today_count) || 0,
+      active_run: summary.active_run || null,
+      last_finished: summary.last_finished || null,
+      hermesReachable: await freshHermesReachable(info.hermesReachable),
+      generated_at: now(),
+    });
+  }
+
   function handlePushUnregister(res, device) {
     if (typeof pairingStore.clearPushToken !== "function") {
       sendJson(res, 501, { error: "push_unavailable" });
@@ -726,6 +827,29 @@ export function createIrisLinkServer({
       if (method === "PUT") handlePushRegister(res, device, body);
       else if (method === "DELETE") handlePushUnregister(res, device);
       else sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+
+    if (rawPath === "/link/live-activity") {
+      if (method === "PUT") handleLiveActivityRegister(res, device, body);
+      else if (method === "DELETE") handleLiveActivityUnregister(res, device, rawQuery);
+      else sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+
+    if (rawPath === "/link/live-activity/start-token") {
+      if (method === "PUT") handlePushToStartRegister(res, device, body);
+      else if (method === "DELETE") handlePushToStartUnregister(res, device);
+      else sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+
+    if (rawPath === "/link/summary") {
+      if (method !== "GET") {
+        sendJson(res, 405, { error: "method_not_allowed" });
+        return;
+      }
+      await handleSummary(res, device);
       return;
     }
 

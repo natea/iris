@@ -15,6 +15,23 @@ export const APNS_HOSTS = Object.freeze({
 export const APNS_ENVIRONMENTS = Object.freeze(["sandbox", "production"]);
 export const APNS_DEFAULT_TOPIC = "app.iris.liveprototype";
 
+// Apple's two push types Iris sends. A Live Activity push is NOT an alert
+// push: it has its own `apns-push-type` and its own topic suffix, and sending
+// it on the plain topic is rejected.
+// Source: "Starting and updating Live Activities with ActivityKit push
+// notifications" — "Set the value for the `apns-push-type` header field to
+// `liveactivity`" and "Set the `apns-topic` header field using the following
+// format: `<your bundleID>.push-type.liveactivity`".
+export const APNS_PUSH_TYPES = Object.freeze(["alert", "liveactivity"]);
+export const LIVE_ACTIVITY_TOPIC_SUFFIX = ".push-type.liveactivity";
+// "You must not use a compressed JSON payload, and it's limited to a maximum
+// size of 4 KB (4096 bytes)." — Sending notification requests to APNs.
+export const APNS_MAX_PAYLOAD_BYTES = 4096;
+
+export function liveActivityTopic(baseTopic) {
+  return `${String(baseTopic || "")}${LIVE_ACTIVITY_TOPIC_SUFFIX}`;
+}
+
 // Apple rejects a provider token older than one hour and refuses to mint a
 // replacement more than once every twenty minutes. Refresh comfortably inside
 // the first limit; never regenerate inside the second.
@@ -227,9 +244,21 @@ export function createApnsClient({
     // Exposed for tests and diagnostics; never logged or returned to a client.
     _providerToken: providerToken,
 
-    async send({ deviceToken, environment, payload, collapseId, priority, expiration } = {}) {
+    async send({
+      deviceToken,
+      environment,
+      payload,
+      collapseId,
+      priority,
+      expiration,
+      pushType = "alert",
+    } = {}) {
       if (!keyId || !teamId || !topic) {
         return { ok: false, status: 0, reason: "not_configured", unregistered: false };
+      }
+      const type = String(pushType || "alert");
+      if (!APNS_PUSH_TYPES.includes(type)) {
+        return { ok: false, status: 0, reason: "invalid_push_type", unregistered: false };
       }
       if (!isValidDeviceToken(deviceToken)) {
         // A malformed token can never become valid: treat it like a drop.
@@ -246,6 +275,20 @@ export function createApnsClient({
       } catch {
         return { ok: false, status: 0, reason: "invalid_payload", unregistered: false };
       }
+      // Apple refuses an oversized payload outright; refusing it here costs no
+      // request and produces a reason the caller can act on.
+      if (body.length > APNS_MAX_PAYLOAD_BYTES) {
+        return { ok: false, status: 0, reason: "payload_too_large", unregistered: false };
+      }
+      // A Live Activity push goes to the dedicated topic; everything else
+      // keeps the bundle id it always used.
+      const requestTopic = type === "liveactivity" ? liveActivityTopic(topic) : topic;
+      // Apple: "If you don't specify the `apns-priority` value, APNs delivers
+      // the ActivityKit push notification immediately with the default
+      // priority of 10 and counts it toward the notification budget." A Live
+      // Activity push therefore defaults to 5 here — the budget-free one —
+      // and the caller opts into 10 for the updates that matter.
+      const requestPriority = priority ?? (type === "liveactivity" ? 5 : 10);
 
       const attempt = async (force) => {
         let bearer;
@@ -256,9 +299,9 @@ export function createApnsClient({
         }
         const headers = {
           authorization: `bearer ${bearer}`,
-          "apns-topic": topic,
-          "apns-push-type": "alert",
-          "apns-priority": String(priority ?? 10),
+          "apns-topic": requestTopic,
+          "apns-push-type": type,
+          "apns-priority": String(requestPriority),
           "content-type": "application/json",
           "content-length": String(body.length),
         };

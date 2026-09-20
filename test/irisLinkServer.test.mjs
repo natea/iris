@@ -1381,3 +1381,182 @@ test("a malformed resume handle is refused before the minter is called", async (
   }
   assert.equal(calls, 0);
 });
+
+const ACTIVITY_TOKEN = "c".repeat(64);
+const START_TOKEN = "d".repeat(64);
+
+test("Live Activity tokens register, replace and unregister, and are never returned", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body: paired } = await pair(link, "Nate's iPhone");
+
+  const start = await linkFetch(link, paired.credential, "/link/live-activity/start-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: START_TOKEN, environment: "sandbox" }),
+  });
+  assert.equal(start.status, 200);
+  assert.deepEqual(start.body, { ok: true, pushToStartEnabled: true, environment: "sandbox" });
+
+  const update = await linkFetch(link, paired.credential, "/link/live-activity", {
+    method: "PUT",
+    body: JSON.stringify({
+      activity_id: "ACT-1",
+      token: ACTIVITY_TOKEN,
+      environment: "sandbox",
+    }),
+  });
+  assert.equal(update.status, 200);
+  assert.deepEqual(update.body, { ok: true, activity_id: "ACT-1", liveActivityEnabled: true });
+
+  // Only the push sender can see a token; no route and no listing can.
+  assert.deepEqual(link.store.getLiveActivityTargets(paired.deviceId).activities, [
+    { activityId: "ACT-1", token: ACTIVITY_TOKEN, environment: "sandbox" },
+  ]);
+  const serialized = JSON.stringify([start.body, update.body, link.store.listDevices()]);
+  for (const secret of [START_TOKEN, ACTIVITY_TOKEN]) {
+    assert.equal(serialized.includes(secret), false);
+  }
+
+  // One activity by id, then everything.
+  const removedOne = await linkFetch(
+    link,
+    paired.credential,
+    "/link/live-activity?activity_id=ACT-1",
+    { method: "DELETE" },
+  );
+  assert.equal(removedOne.status, 200);
+  assert.deepEqual(link.store.getLiveActivityTargets(paired.deviceId).activities, []);
+
+  const removedStart = await linkFetch(link, paired.credential, "/link/live-activity/start-token", {
+    method: "DELETE",
+  });
+  assert.deepEqual(removedStart.body, { ok: true, pushToStartEnabled: false });
+  assert.equal(link.store.getLiveActivityTargets(paired.deviceId).startToken, null);
+});
+
+test("Live Activity routes refuse the unpaired and the malformed", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body: paired } = await pair(link, "iPhone");
+
+  for (const path of ["/link/live-activity", "/link/live-activity/start-token", "/link/summary"]) {
+    const anonymous = await linkFetch(link, "", path, {
+      method: path === "/link/summary" ? "GET" : "PUT",
+      body: path === "/link/summary" ? undefined : JSON.stringify({ token: ACTIVITY_TOKEN }),
+    });
+    assert.equal(anonymous.status, 401, path);
+    assert.deepEqual(anonymous.body, { error: "not_paired" });
+  }
+
+  const noId = await linkFetch(link, paired.credential, "/link/live-activity", {
+    method: "PUT",
+    body: JSON.stringify({ token: ACTIVITY_TOKEN, environment: "sandbox" }),
+  });
+  assert.deepEqual(noId.body, { error: "invalid_activity_id" });
+
+  const badToken = await linkFetch(link, paired.credential, "/link/live-activity", {
+    method: "PUT",
+    body: JSON.stringify({ activity_id: "A", token: "nope", environment: "sandbox" }),
+  });
+  assert.deepEqual(badToken.body, { error: "invalid_token" });
+
+  const badEnvironment = await linkFetch(link, paired.credential, "/link/live-activity/start-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: START_TOKEN, environment: "moon" }),
+  });
+  assert.deepEqual(badEnvironment.body, { error: "invalid_environment" });
+
+  const wrongMethod = await linkFetch(link, paired.credential, "/link/live-activity");
+  assert.equal(wrongMethod.status, 405);
+});
+
+test("revoking a device destroys its Live Activity tokens with its credential", async (t) => {
+  const link = await startLink();
+  t.after(() => link.close());
+  const { body: paired } = await pair(link, "iPhone");
+  await linkFetch(link, paired.credential, "/link/live-activity/start-token", {
+    method: "PUT",
+    body: JSON.stringify({ token: START_TOKEN, environment: "sandbox" }),
+  });
+  await linkFetch(link, paired.credential, "/link/live-activity", {
+    method: "PUT",
+    body: JSON.stringify({ activity_id: "A", token: ACTIVITY_TOKEN, environment: "sandbox" }),
+  });
+  assert.deepEqual(link.store.liveActivityDeviceIds(), [paired.deviceId]);
+
+  link.store.revoke(paired.deviceId);
+  assert.deepEqual(link.store.liveActivityDeviceIds(), []);
+  assert.equal(link.store.getLiveActivityTargets(paired.deviceId), null);
+  const after = await linkFetch(link, paired.credential, "/link/live-activity", {
+    method: "PUT",
+    body: JSON.stringify({ activity_id: "A", token: ACTIVITY_TOKEN, environment: "sandbox" }),
+  });
+  assert.equal(after.status, 401);
+});
+
+test("/link/summary is the widget's whole data source: counts, two lines, no steps", async (t) => {
+  const link = await startLink({
+    checkHermesReachable: async () => true,
+    tasks: {
+      summary: () => ({
+        active_count: 2,
+        waiting_count: 1,
+        finished_today_count: 4,
+        active_run: {
+          run_id: "run-8f21",
+          title: "Summarize the quarterly numbers",
+          headline: "Running code",
+          needs_attention: true,
+        },
+        last_finished: {
+          run_id: "run-7c10",
+          title: "Book a table",
+          status: "completed",
+          finished_at: 1_758_240_301_000,
+        },
+      }),
+    },
+  });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link, "iPhone");
+
+  const summary = await linkFetch(link, paired.credential, "/link/summary");
+  assert.equal(summary.status, 200);
+  assert.deepEqual(Object.keys(summary.body).sort(), [
+    "active_count",
+    "active_run",
+    "finished_today_count",
+    "generated_at",
+    "hermesReachable",
+    "last_finished",
+    "waiting_count",
+  ]);
+  assert.equal(summary.body.active_count, 2);
+  assert.equal(summary.body.waiting_count, 1);
+  assert.equal(summary.body.finished_today_count, 4);
+  assert.equal(summary.body.hermesReachable, true);
+  assert.ok(summary.body.generated_at > 0);
+  assert.deepEqual(Object.keys(summary.body.active_run).sort(), [
+    "headline",
+    "needs_attention",
+    "run_id",
+    "title",
+  ]);
+  assert.equal(summary.body.last_finished.status, "completed");
+  // A widget is a glance: no step list and no result text may appear here.
+  const text = JSON.stringify(summary.body);
+  assert.equal(text.includes("steps"), false);
+  assert.equal(text.includes("output"), false);
+
+  const wrongMethod = await linkFetch(link, paired.credential, "/link/summary", { method: "POST" });
+  assert.equal(wrongMethod.status, 405);
+});
+
+test("/link/summary says so when the desktop has no summary handler", async (t) => {
+  const link = await startLink({ tasks: {} });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link, "iPhone");
+  const summary = await linkFetch(link, paired.credential, "/link/summary");
+  assert.equal(summary.status, 501);
+  assert.deepEqual(summary.body, { error: "tasks_unavailable" });
+});

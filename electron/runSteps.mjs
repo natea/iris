@@ -390,6 +390,30 @@ export function createRunSteps({
       runs.delete(String(runId || ""));
     },
 
+    /**
+     * What a Live Activity needs and nothing more: the headline, the count,
+     * whether the history can be vouched for, and the running step's own
+     * preview. Allocates no step objects, because this is called on the event
+     * path rather than on a request.
+     */
+    progress(runId) {
+      const run = runs.get(String(runId || ""));
+      if (!run) return { headline: "", step_count: 0, steps_complete: false, detail: "" };
+      let detail = "";
+      for (let i = run.steps.length - 1; i >= 0; i--) {
+        if (run.steps[i].status === "running") {
+          detail = run.steps[i].preview;
+          break;
+        }
+      }
+      return {
+        headline: headlineFor(run),
+        step_count: run.steps.length,
+        steps_complete: !run.truncated,
+        detail,
+      };
+    },
+
     /** `{headline, step_count}` for a list entry — never the full step list. */
     summary(runId) {
       const run = runs.get(String(runId || ""));

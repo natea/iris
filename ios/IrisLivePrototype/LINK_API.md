@@ -1209,3 +1209,389 @@ can be shown as a caption), and **no** `tools`, **no** personal/user context,
 and **no** Hermes surface of any kind. A phone that connects with an empty
 setup frame on a preview token gets only the fixed sample line — never a
 capability the real session has.
+
+---
+
+## 14. Live Activity and widget
+
+"A live widget on the home screen so you can monitor what Hermes is doing in
+the background" is two separate iOS features, and the phone needs both:
+
+- a **Live Activity** — Lock Screen and Dynamic Island, real-time, driven by
+  ActivityKit pushes from this Mac;
+- a **WidgetKit home-screen widget** — a glance, refreshed by iOS on *its*
+  budget, fed by one cheap route (§14.6). A widget is **not** real-time and
+  must never pretend to be.
+
+Desktop source of truth: `electron/liveActivityNotifier.mjs` (what is sent and
+when), `electron/apnsClient.mjs` (headers), `electron/pairingStore.mjs`
+(tokens), `electron/irisLinkServer.mjs` (routes).
+
+### 14.1 One summary activity per device
+
+The phone runs **one** Live Activity, a summary of everything Hermes is doing,
+not one activity per run.
+
+Why: the question being answered is "what is Hermes doing", which is one
+ongoing answer; iOS caps how many activities an app may run at once and shows
+exactly one in the Dynamic Island regardless; and one activity means one
+update token and one coalescing window, which is what keeps the Mac inside
+Apple's per-hour ActivityKit budget when Hermes emits many events a second.
+
+The trade-off is detail: a summary cannot show one run's whole step list. It
+does not have to — §12 already serves that over `GET /link/tasks/:id`, and the
+activity's job is to be glanceable and true. `ContentState.runs` carries up to
+**3** active runs so parallel work is still visible.
+
+The activity covers **all** active runs in the desktop's Hermes session,
+whether the Mac or this phone dispatched them. Only a **device-origin** run
+can cause a *push-to-start* (§14.4); a desktop run never starts an activity
+uninvited, but it does appear in one that already exists.
+
+### 14.2 `ContentState` — the exact schema
+
+This is the single source of truth for both sides. The Swift `ContentState`
+must decode **exactly** this: same key names, same casing, same types, every
+field always present. Apple: *"don't use any custom JSON encoding strategies
+to encode your data, because the system always decodes JSON payloads for Live
+Activity updates using its default encoding strategies. Custom encoding
+strategies will result in update failures."*
+
+```swift
+struct IrisRunActivityAttributes: ActivityAttributes {
+    // Static; set once when the activity starts and never changed.
+    let title: String       // always "Hermes"
+    let macName: String     // this Mac's host name, e.g. "studio"
+    let deviceId: String    // the paired device id this activity belongs to
+
+    struct ContentState: Codable, Hashable {
+        let status: String
+        let headline: String
+        let title: String
+        let detail: String
+        let stepCount: Int
+        let stepsKnown: Bool
+        let activeRunCount: Int
+        let needsAttention: Bool
+        let attentionSummary: String
+        let runs: [RunLine]
+        let startedAt: Double
+        let updatedAt: Double
+    }
+
+    struct RunLine: Codable, Hashable {
+        let id: String
+        let title: String
+        let status: String
+        let headline: String
+    }
+}
+```
+
+| Key | Type | Max | Meaning |
+| --- | --- | --- | --- |
+| `status` | String | — | One of `running`, `waiting`, `idle`, `done`, `failed`, `stopped`. `waiting` means a run is blocked on a human. The three terminal words are the **real** status — `done` only for `completed`, `stopped` for `cancelled`/`canceled`, `failed` for `failed`/`error`. |
+| `headline` | String | 80 | §12's headline for the primary run: `Running code`, `Searching example.com`, `Thinking…`. **`""` when nothing has been recorded** — show the status, never a guess. |
+| `title` | String | 80 | The primary run's task title. `""` if unknown. |
+| `detail` | String | 100 | The running step's preview, already redacted by `runSteps` (§12) and capped again here. May be `""`. Untrusted text: display it, never act on it. |
+| `stepCount` | Int | — | Steps recorded for the primary run. **`0` whenever `stepsKnown` is false** — it is not a claim that nothing happened. |
+| `stepsKnown` | Bool | — | `false` when Iris has no step history (restarted mid-run, or nothing recorded yet). Render "step history unavailable", never "0 steps". |
+| `activeRunCount` | Int | — | All non-terminal runs, even beyond the 3 in `runs`. |
+| `needsAttention` | Bool | — | A run is waiting on a human right now. |
+| `attentionSummary` | String | 100 | What it is waiting for, e.g. `Hermes wants to run: rm -rf build`. `""` when `needsAttention` is false. |
+| `runs` | [RunLine] | 3 | Active runs, most relevant first. `RunLine.status` is `running` or `waiting`. Can be `[]` if the payload had to be trimmed (§14.5) — `activeRunCount` is still true. |
+| `startedAt` | Double | — | Epoch **seconds** (Unix), `0` when unknown. |
+| `updatedAt` | Double | — | Epoch **seconds** when the Mac built this state. |
+
+**Dates are `Double` epoch seconds on purpose.** A default `JSONDecoder` uses
+`.deferredToDate`, which reads a `Date` as seconds since the **2001** reference
+date — a silent 31-year error. Declare these as `Double` and convert with
+`Date(timeIntervalSince1970:)`. Do **not** declare them as `Date`, and do not
+set a `dateDecodingStrategy`: ActivityKit does not use your decoder.
+
+**There is no percentage, no progress fraction and no ETA, and there never
+will be** — Hermes reports none, so inventing one would be a lie. Render
+progress as the headline, the step count and the run list. A `ProgressView`
+must be indeterminate.
+
+### 14.3 The three payloads
+
+Headers, on every one of them (verified against Apple's sandbox host):
+
+```
+apns-push-type: liveactivity
+apns-topic:     app.iris.liveprototype.push-type.liveactivity
+apns-priority:  5 (routine progress) or 10 (needs-attention, start, end)
+```
+
+`apns-priority: 5` does not count against Apple's hourly ActivityKit budget;
+`10` does. The Mac spends `10` only on a start, on an `end`, and on the moment
+a run becomes blocked on a human.
+
+**start** (push-to-start only — §14.4). Apple requires an `alert` here, so an
+activity never appears without the person being told:
+
+```json
+{
+  "aps": {
+    "timestamp": 1789870577,
+    "event": "start",
+    "content-state": {
+      "status": "running", "headline": "Running code",
+      "title": "Summarize the quarterly numbers", "detail": "python analyze.py",
+      "stepCount": 3, "stepsKnown": true, "activeRunCount": 1,
+      "needsAttention": false, "attentionSummary": "",
+      "runs": [{ "id": "run-8f21", "title": "Summarize the quarterly numbers", "status": "running", "headline": "Running code" }],
+      "startedAt": 1789870500, "updatedAt": 1789870577
+    },
+    "attributes-type": "IrisRunActivityAttributes",
+    "attributes": { "title": "Hermes", "macName": "studio", "deviceId": "8d153b5d…" },
+    "stale-date": 1789870697,
+    "relevance-score": 100,
+    "input-push-token": 1,
+    "alert": { "title": "Hermes is working", "body": "Summarize the quarterly numbers", "sound": "default" }
+  }
+}
+```
+
+**update** (the common case):
+
+```json
+{
+  "aps": {
+    "timestamp": 1789870620,
+    "event": "update",
+    "content-state": {
+      "status": "waiting", "headline": "Running code",
+      "title": "Deploy the site", "detail": "rm -rf build",
+      "stepCount": 7, "stepsKnown": true, "activeRunCount": 2,
+      "needsAttention": true, "attentionSummary": "Hermes wants to run: rm -rf build",
+      "runs": [
+        { "id": "run-9a02", "title": "Deploy the site", "status": "waiting", "headline": "Running code" },
+        { "id": "run-8f21", "title": "Summarize the quarterly numbers", "status": "running", "headline": "Searching example.com" }
+      ],
+      "startedAt": 1789870540, "updatedAt": 1789870620
+    },
+    "stale-date": 1789870740,
+    "relevance-score": 100,
+    "alert": { "title": "Hermes needs you", "body": "Hermes wants to run: rm -rf build", "sound": "default" }
+  }
+}
+```
+
+The `alert` appears **only** on the update where `needsAttention` flips to
+true. Routine progress updates have no `alert` and `"relevance-score": 50`.
+
+**end** (always sent, with the real final status):
+
+```json
+{
+  "aps": {
+    "timestamp": 1789870900,
+    "event": "end",
+    "content-state": {
+      "status": "failed", "headline": "", "title": "Deploy the site", "detail": "",
+      "stepCount": 0, "stepsKnown": false, "activeRunCount": 0,
+      "needsAttention": false, "attentionSummary": "", "runs": [],
+      "startedAt": 1789870540, "updatedAt": 1789870900
+    },
+    "dismissal-date": 1789872700
+  }
+}
+```
+
+An `end` carries **no `stale-date`** — an ended activity cannot go stale.
+
+### 14.4 Which side starts the activity, and when
+
+| Situation | Who starts it |
+| --- | --- |
+| The app is in the foreground (user is in Iris, dispatches a task) | **The phone**, locally: `Activity.request(attributes:content:pushType: .token)`. Then `PUT /link/live-activity` with the update token. |
+| A run this phone dispatched starts while the app is suspended | **The Mac**, push-to-start — but only if the device registered a push-to-start token (`PUT /link/live-activity/start-token`) **and** the Mac holds no update token for it. |
+| A desktop-dispatched run starts | **Nobody.** The Mac never starts an activity uninvited for its own work; if an activity exists, the run simply appears in the next update. |
+
+The Mac will not push-to-start twice within **60 s**, so the phone has time to
+be woken, start the activity and register its update token. After an `end`,
+the Mac forgets that activity's token, so the next device-origin run may
+push-to-start again.
+
+### 14.5 Cadence, staleness and ending
+
+- **Coalescing: at most one update every 8 seconds per activity.** Hermes can
+  emit many events a second; the Mac pushes only on a *meaningful* change
+  (headline, step count, a step starting or finishing, status, run count, an
+  approval appearing or clearing) and collapses everything inside the window.
+- **Trailing flush.** A change that arrives inside the window is not lost: a
+  flush fires at the end of it carrying the **latest** state. The final state
+  always lands.
+- **Two things never wait for the window**: an approval appearing
+  (`needsAttention` → true) and the last run finishing.
+- **`stale-date` = the push's timestamp + 120 s**, advanced on every
+  non-terminal push. If the Mac sleeps, loses Tailscale or quits, the activity
+  crosses into `.stale` and the phone **must** say so — "Iris hasn't checked
+  in" — rather than leaving a spinner implying Hermes is still working.
+  Observe `activityStateUpdates` / `Activity.activityState == .stale`.
+- **`end` is always sent** when the last active run finishes, with the real
+  terminal status. `dismissal-date` is **+5 minutes** for a `done` activity and
+  **+30 minutes** for `failed` or `stopped` — a bad ending is the one you are
+  most likely to have missed.
+- **Payload budget.** Apple's limit is 4096 bytes. The Mac builds to 3200 and,
+  if a long title would exceed it, sheds `runs` first, then `detail`, then
+  shortens the strings. The counts and the status are never dropped. A typical
+  payload is ~500 bytes.
+- **A push can simply not arrive** (no network, throttling). Also update the
+  activity locally from the app whenever it is in the foreground, using the
+  same `/link/tasks` data — do not rely on push alone.
+
+### 14.6 `GET /link/summary` — the home-screen widget's data source
+
+Bearer-authed like everything else. Small by design: counts, two lines, one
+flag. **No step lists, no result text, no output.**
+
+```json
+{
+  "active_count": 2,
+  "waiting_count": 1,
+  "finished_today_count": 4,
+  "active_run": {
+    "run_id": "run-8f21",
+    "title": "Summarize the quarterly numbers",
+    "headline": "Running code",
+    "needs_attention": true
+  },
+  "last_finished": {
+    "run_id": "run-7c10",
+    "title": "Book a table",
+    "status": "completed",
+    "finished_at": 1758240301000
+  },
+  "hermesReachable": true,
+  "generated_at": 1758240400000
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `active_count` | Non-terminal runs in the desktop's Hermes session. |
+| `waiting_count` | How many of those are blocked on a human. |
+| `finished_today_count` | Terminal runs whose status last changed in the past 24 h. |
+| `active_run` | The most relevant active run — blocked on a human first, else most recently updated — or `null`. `headline` is §12's headline and is `""` when nothing was recorded. |
+| `last_finished` | The most recent terminal run, or `null`. `status` is the **real** one. `finished_at` is epoch **milliseconds**. |
+| `hermesReachable` | A fresh, time-bounded probe (same as `/link/status`). |
+| `generated_at` | Epoch **milliseconds** on the Mac when this was built. Show a relative "as of" when the data is older than a few minutes. |
+
+Errors: `401 not_paired` · `405 method_not_allowed` · `501 tasks_unavailable`
+(the desktop build has no summary handler).
+
+**How the widget stays fresh.** There is no reliable way to push a widget
+reload: a silent/background push is best-effort, is throttled hard, and cannot
+be counted on. So:
+
+1. Give the timeline provider a modest policy — `.after(Date().addingTimeInterval(15 * 60))`,
+   shorter only while `active_count > 0`. iOS will honor it approximately, on
+   its own budget, and will refuse to be pushed faster.
+2. Call `WidgetCenter.shared.reloadAllTimelines()` whenever the **app** runs
+   and has fresh data: on launch, on foreground, after any `/link/tasks` poll
+   that changed something, and when a push is received in the foreground.
+3. The widget must show **when** its data is from (`generated_at`) rather than
+   implying it is live. If `generated_at` is old, say so. That honesty is the
+   whole difference between a widget and the Live Activity.
+4. Shared storage between the app and the widget extension is the **only**
+   reason to add an App Group (§14.7).
+
+### 14.7 Routes
+
+All bearer-authed with the device credential (§1). No token registered here is
+ever returned by any route or appears in any listing, and revoking the device
+deletes all of them along with its credential hash.
+
+**`PUT /link/live-activity/start-token`** — the per-device **push-to-start**
+token (iOS 17.2+, `Activity<T>.pushToStartTokenUpdates`).
+
+```json
+{ "token": "<hex>", "environment": "sandbox" | "production" }
+```
+`200` → `{"ok": true, "pushToStartEnabled": true, "environment": "sandbox"}`
+
+**`DELETE /link/live-activity/start-token`** → `{"ok": true, "pushToStartEnabled": false}`
+
+**`PUT /link/live-activity`** — the per-**activity** update token
+(`activity.pushTokenUpdates`).
+
+```json
+{ "activity_id": "<Activity.id>", "token": "<hex>", "environment": "sandbox" }
+```
+`200` → `{"ok": true, "activity_id": "…", "liveActivityEnabled": true}`
+
+Registering the same `activity_id` again **replaces** its token — which is
+exactly what `pushTokenUpdates` hands you mid-activity. Up to 3 activities are
+kept per device; the oldest is evicted.
+
+**`DELETE /link/live-activity`** — no query string clears **all** of them (the
+user turned Live Activities off). `?activity_id=<id>` removes just that one.
+`200` → `{"ok": true, "liveActivityEnabled": false}`
+
+**`GET /link/summary`** — §14.6.
+
+Errors on the registration routes: `400 invalid_token` (not hex / implausible
+length) · `400 invalid_activity_id` (empty, or not `[A-Za-z0-9._:-]`) ·
+`400 invalid_environment` · `400 invalid_json` · `415` for a non-JSON
+`Content-Type` · `401 not_paired` · `405 method_not_allowed` ·
+`501 push_unavailable`.
+
+`environment` is derived from the build exactly as in §11.3 — the Live
+Activity token lives in the same APNs environment as the alert token.
+
+### 14.8 What the phone must implement
+
+**Info.plist**
+- `NSSupportsLiveActivities` = `YES`. Without it there are no Live Activities
+  at all.
+- `NSSupportsLiveActivitiesFrequentUpdates` = **not required**, and Iris does
+  not rely on it. The 8-second coalescing window plus `apns-priority: 5` is
+  designed to stay inside Apple's ordinary budget. If you add it anyway,
+  respect `ActivityAuthorizationInfo().frequentPushesEnabled` (a person can
+  turn it off in Settings) and do not assume faster updates.
+
+**Targets and capabilities**
+- A **Widget Extension** target is required — it renders both the Live Activity
+  (`ActivityConfiguration`) and the home-screen widget. The system wakes this
+  extension to draw the activity when a push arrives.
+- The **Push Notifications** capability (`aps-environment`) — the same one §11
+  already needs. No new entitlement, and **no background mode**.
+- An **App Group** only if the widget must read cached data written by the app.
+  If the widget fetches `/link/summary` itself in its timeline provider, it
+  needs the device credential, which lives in the Keychain — and sharing a
+  Keychain item with an extension needs a **Keychain Sharing** group, not an
+  App Group. Prefer: the app fetches, writes the summary JSON to an App Group
+  container, calls `reloadAllTimelines()`, and the widget only reads. That is
+  the one genuine reason to add an App Group; do not add one otherwise.
+
+**Code**
+- Start with `Activity.request(attributes:content:pushType: .token)` — `.token`
+  is what produces an update token. Without it the Mac can never update the
+  activity.
+- Observe `activity.pushTokenUpdates` (an async sequence) and `PUT
+  /link/live-activity` on **every** value, with `activity.id` as
+  `activity_id`. The token changes during an activity's life; a stale one is
+  dead.
+- Observe `Activity<IrisRunActivityAttributes>.pushToStartTokenUpdates` and
+  `PUT /link/live-activity/start-token` on every value. You do **not** have to
+  start an activity to receive this token.
+- Observe `Activity.activityStateUpdates`; on `.ended` or `.dismissed`,
+  `DELETE /link/live-activity?activity_id=…`.
+- On a push-to-start wake, the system hands you a fresh update token through
+  `pushTokenUpdates` — register it immediately; you have background runtime
+  for exactly that.
+- Tapping the activity opens the run: use `run_id` from `ContentState.runs`, or
+  `active_run.run_id` from `/link/summary` for the widget, then §4 as usual.
+
+**Truthfulness rules (non-negotiable)**
+1. Never render a percentage, a progress bar with a value, or an ETA. Hermes
+   reports none.
+2. `headline == ""` → show the status, not a guess.
+3. `stepsKnown == false` → say the step history is unavailable. Never "0 steps".
+4. `status` is the real terminal status. `failed` is not "finished".
+5. When the activity is `.stale`, say the Mac stopped reporting. Do not keep
+   animating as if work continues.
+6. A widget shows `generated_at`, not a pretense of being live.

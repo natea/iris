@@ -69,6 +69,7 @@ import { createPairingStore } from "./pairingStore.mjs";
 import { createIrisLinkServer } from "./irisLinkServer.mjs";
 import { createApnsClient, resolveApnsConfig } from "./apnsClient.mjs";
 import { createPushNotifier } from "./pushNotifier.mjs";
+import { createLiveActivityNotifier } from "./liveActivityNotifier.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
 import { createRunSteps, parseStepsSince } from "./runSteps.mjs";
 import {
@@ -331,12 +332,37 @@ function emitToRenderer(channel, payload) {
 // the desktop task card builds — without changing anything the renderer sees.
 const runSteps = createRunSteps();
 
+// The Live Activity notifier is built further down, once the pairing store and
+// the APNs client exist. It is declared here because emitEvent — the one place
+// every Hermes event passes through — is the narrowest honest place to nudge
+// it, and emitEvent is defined long before push is configured. It stays null
+// when push is unconfigured, and every call site tolerates that.
+let liveActivity = null;
+
+// Only the events that can change what the activity says. A transcript, a log
+// line or an audio state change must not cost a push.
+const LIVE_ACTIVITY_EVENT_TYPES = new Set([
+  "hermes_task_event",
+  "hermes_task_update",
+  "hermes_completion",
+  "hermes_interaction",
+]);
+
+function noteLiveActivityChange() {
+  try {
+    liveActivity?.noteChange();
+  } catch {
+    // A Live Activity must never break the event path it rides on.
+  }
+}
+
 function emitEvent(event) {
   try {
     runSteps.record(event);
   } catch {
     // Progress telemetry must never break the event path it rides on.
   }
+  if (LIVE_ACTIVITY_EVENT_TYPES.has(event?.type)) noteLiveActivityChange();
   emitToRenderer("sidecar:event", { timestamp: Date.now() / 1000, ...event });
 }
 
@@ -1531,6 +1557,8 @@ async function approveHermesAction({ run_id, choice }, { trustedUi = false } = {
   approvalResolutionCooldown.set(runId, Date.now());
   runRegistry.setApproval(runId, null);
   pushNotifier.clearAttention(runId);
+  // The approval is answered: the activity must stop saying "needs you".
+  noteLiveActivityChange();
   return { status: "resolved", run_id: runId, choice: cleanChoice, result };
 }
 
@@ -3923,6 +3951,73 @@ const pushNotifier = createPushNotifier({
   log: (message, level = "info") => emitEvent({ type: "log", level, message }),
 });
 
+// ===== Live Activity (the Lock Screen / Dynamic Island monitor) =====
+//
+// One summary activity per paired device, driven by ActivityKit pushes from
+// this Mac. Everything it shows is read from the run registry and the step
+// accumulator at push time — there is no second copy of the truth to drift.
+
+function liveActivityRunView(entry) {
+  const progress = runSteps.progress(entry.runId);
+  const pending = pendingApprovalFor(entry);
+  return {
+    runId: entry.runId,
+    title: entry.task,
+    status: entry.status,
+    origin: entry.origin || "desktop",
+    headline: progress.headline,
+    detail: progress.detail,
+    stepCount: progress.step_count,
+    // False after an Iris restart, or before any event landed: the phone says
+    // so rather than claiming the run has done nothing.
+    stepsKnown: progress.steps_complete,
+    startedAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    pendingApproval: pending ? { summary: pending.summary } : null,
+  };
+}
+
+function liveActivitySnapshot() {
+  const entries = runRegistry.list({ sessionId: hermesSessionId() });
+  const activeRuns = [];
+  let lastFinished = null;
+  for (const entry of entries) {
+    if (TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase())) {
+      // `list` is newest-first, so the first terminal entry is the last one
+      // that finished.
+      if (!lastFinished) {
+        lastFinished = {
+          runId: entry.runId,
+          title: entry.task,
+          status: entry.status,
+          startedAt: entry.createdAt,
+          updatedAt: entry.updatedAt,
+        };
+      }
+      continue;
+    }
+    activeRuns.push(liveActivityRunView(entry));
+  }
+  return { activeRuns, lastFinished };
+}
+
+liveActivity = createLiveActivityNotifier({
+  getClient: getApnsClient,
+  getSnapshot: liveActivitySnapshot,
+  getDeviceIds: () => getPairingStore().liveActivityDeviceIds(),
+  getTargets: (deviceId) => getPairingStore().getLiveActivityTargets(deviceId),
+  // Static for the life of the activity: never anything that changes.
+  getAttributes: (deviceId) => ({
+    title: "Hermes",
+    macName: os.hostname().replace(/\.local$/, ""),
+    deviceId: String(deviceId || ""),
+  }),
+  dropActivity: (deviceId, activityId) =>
+    getPairingStore().clearLiveActivityToken(deviceId, activityId),
+  dropStartToken: (deviceId) => getPairingStore().clearLiveActivityStartToken(deviceId),
+  log: (message, level = "info") => emitEvent({ type: "log", level, message }),
+});
+
 // Ephemeral tokens are what let the phone hold a credential that expires in
 // minutes instead of a Gemini key that has to be rotated everywhere.
 //
@@ -4050,7 +4145,53 @@ async function startIrisLink() {
         if (!result || result.status === "error") {
           return { error: "dispatch_failed", message: result?.error || "Dispatch failed." };
         }
+        // A run this phone asked for is exactly when a Live Activity should
+        // appear without the user doing anything. Push-to-start only if the
+        // device registered a start token and has no activity already; the
+        // app starts it locally when it is foregrounded. Never blocks the
+        // dispatch response, never throws into it.
+        void Promise.resolve()
+          .then(() => liveActivity?.noteDeviceRunStarted({ deviceId }))
+          .catch(() => {});
+        noteLiveActivityChange();
         return result;
+      },
+      // The home-screen widget's whole data source (LINK_API.md §14.6).
+      summary: () => {
+        const entries = runRegistry.list({ sessionId: hermesSessionId() });
+        const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        const active = entries.filter(
+          (entry) => !TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase()),
+        );
+        const waiting = active.filter((entry) => pendingApprovalFor(entry));
+        const finished = entries.filter((entry) =>
+          TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase()),
+        );
+        // The one worth a glance: blocked on a human first, else most recent.
+        const primary = waiting[0] || active[0] || null;
+        const last = finished[0] || null;
+        return {
+          active_count: active.length,
+          waiting_count: waiting.length,
+          finished_today_count: finished.filter((entry) => entry.updatedAt >= dayAgo).length,
+          active_run: primary
+            ? {
+                run_id: primary.runId,
+                title: String(primary.task || "").slice(0, 120),
+                // Real progress or nothing at all — never a guess.
+                headline: runSteps.progress(primary.runId).headline,
+                needs_attention: Boolean(pendingApprovalFor(primary)),
+              }
+            : null,
+          last_finished: last
+            ? {
+                run_id: last.runId,
+                title: String(last.task || "").slice(0, 120),
+                status: last.status,
+                finished_at: last.updatedAt,
+              }
+            : null,
+        };
       },
       list: ({ deviceId, undelivered }) => {
         const sessionId = hermesSessionId();

@@ -379,3 +379,75 @@ test("config comes from env, or from exactly one ~/.iris/AuthKey_*.p8", () => {
     reason: "no_team_id",
   });
 });
+
+test("a Live Activity push uses the liveactivity topic, type and default priority", async () => {
+  const h = makeClient({ replies: [{ status: 200 }] });
+  const result = await h.client.send({
+    deviceToken: TOKEN,
+    environment: "sandbox",
+    pushType: "liveactivity",
+    payload: { aps: { timestamp: 1, event: "update", "content-state": { status: "running" } } },
+  });
+
+  assert.deepEqual(result, { ok: true, status: 200, reason: "", unregistered: false });
+  const sent = h.net.streams[0];
+  // Apple: "<your bundleID>.push-type.liveactivity".
+  assert.equal(sent.headers["apns-topic"], "app.iris.liveprototype.push-type.liveactivity");
+  assert.equal(sent.headers["apns-push-type"], "liveactivity");
+  // Priority 5 is the budget-free one, so it is the default for an activity.
+  assert.equal(sent.headers["apns-priority"], "5");
+  assert.equal(sent.headers[":path"], `/3/device/${TOKEN}`);
+  assert.equal(h.net.sessions[0].host, APNS_HOSTS.sandbox);
+  assert.deepEqual(JSON.parse(sent.body).aps.event, "update");
+});
+
+test("a Live Activity push can be raised to priority 10, and the alert path is untouched", async () => {
+  const h = makeClient({ replies: [{ status: 200 }, { status: 200 }] });
+  await h.client.send({
+    deviceToken: TOKEN,
+    environment: "production",
+    pushType: "liveactivity",
+    priority: 10,
+    payload: { aps: { event: "end" } },
+  });
+  assert.equal(h.net.streams[0].headers["apns-priority"], "10");
+
+  await h.client.send({ deviceToken: TOKEN, environment: "production", payload: { aps: {} } });
+  const alert = h.net.streams[1];
+  assert.equal(alert.headers["apns-topic"], "app.iris.liveprototype");
+  assert.equal(alert.headers["apns-push-type"], "alert");
+  assert.equal(alert.headers["apns-priority"], "10");
+});
+
+test("an unknown push type and an oversized payload are refused without a request", async () => {
+  const h = makeClient({ replies: [{ status: 200 }] });
+  assert.deepEqual(await h.client.send({ deviceToken: TOKEN, environment: "sandbox", pushType: "voip" }), {
+    ok: false,
+    status: 0,
+    reason: "invalid_push_type",
+    unregistered: false,
+  });
+  const huge = { aps: { event: "update", "content-state": { headline: "x".repeat(5000) } } };
+  assert.deepEqual(
+    await h.client.send({ deviceToken: TOKEN, environment: "sandbox", pushType: "liveactivity", payload: huge }),
+    { ok: false, status: 0, reason: "payload_too_large", unregistered: false },
+  );
+  assert.equal(h.net.streams.length, 0, "neither burned an APNs request");
+});
+
+test("a dead Live Activity token is reported as unregistered", async () => {
+  const h = makeClient({ replies: [{ status: 410, body: JSON.stringify({ reason: "Unregistered" }) }] });
+  const result = await h.client.send({
+    deviceToken: TOKEN,
+    environment: "sandbox",
+    pushType: "liveactivity",
+    payload: { aps: { event: "update" } },
+  });
+  assert.equal(result.unregistered, true);
+  assert.equal(result.reason, "Unregistered");
+  assert.equal(
+    h.logs.some((line) => line.includes(TOKEN)),
+    false,
+    "a full token never reaches a log line",
+  );
+});
