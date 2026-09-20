@@ -60,6 +60,11 @@ targets:
         CODE_SIGN_STYLE: Automatic
         # Leave DEVELOPMENT_TEAM empty: pick your team in Xcode > Signing.
         DEVELOPMENT_TEAM: YA3FM9C24T
+        # Push Notifications + Time Sensitive Notifications (LINK_API.md §11.6).
+        # Automatic signing has to be able to add the Push Notifications
+        # capability to app.iris.liveprototype on this team; if provisioning
+        # complains, open the project in Xcode once and let it fix the profile.
+        CODE_SIGN_ENTITLEMENTS: IrisLivePrototype.entitlements
         SWIFT_STRICT_CONCURRENCY: minimal
 
   IrisLivePrototypeUITests:

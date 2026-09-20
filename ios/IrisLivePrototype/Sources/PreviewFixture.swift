@@ -22,6 +22,12 @@ struct PreviewFixture {
     var errorText: String?
     /// Only used to dress the Settings screen while nothing is really paired.
     var pairedName: String?
+    /// Dresses the Settings screen's Voice section (LINK_API.md §13.3) without
+    /// a Mac to ask. DEBUG only, like everything else here.
+    var voices: [LinkVoice] = []
+    var defaultVoice: String = ""
+    var accent: String = ""
+    var pushConfigured: Bool = false
 
     /// nil in release, and nil in debug unless `-uiPreviewState <name>` was
     /// passed on launch.
@@ -58,8 +64,10 @@ struct PreviewFixture {
         case "proposal":  return .proposal
         case "error":     return .errored
         case "reconnecting": return .reconnecting
+        case "voices":    return .voices
         #if DEBUG
         case "progress":  return .progress
+        case "approval":  return .approval
         #endif
         default:          return nil
         }
@@ -120,6 +128,36 @@ struct PreviewFixture {
     /// See RunProgressFixtures.swift — the whole thing is DEBUG-only.
     static let progress = PreviewFixture(
         state: .working(3),
+        lines: conversation,
+        runs: RunProgressFixtures.runs,
+        pairedName: "Nate's MacBook Pro"
+    )
+    #endif
+
+    /// Enough of the catalogue to see the picker, with the styles the real
+    /// one carries. Not the whole thirty: a screenshot of a scrolling list
+    /// proves nothing the first six do not.
+    static let voices = PreviewFixture(
+        state: .idle,
+        lines: [],
+        pairedName: "Nate's MacBook Pro",
+        voices: [
+            LinkVoice(name: "Zephyr", style: "Bright"),
+            LinkVoice(name: "Puck", style: "Upbeat"),
+            LinkVoice(name: "Charon", style: "Informative"),
+            LinkVoice(name: "Kore", style: "Firm"),
+            LinkVoice(name: "Algenib", style: "Gravelly"),
+            LinkVoice(name: "Iapetus", style: "Clear")
+        ],
+        defaultVoice: "Zephyr",
+        accent: "British (RP, London)",
+        pushConfigured: true
+    )
+
+    #if DEBUG
+    /// A run Hermes is waiting on, for the approval card (§11.5).
+    static let approval = PreviewFixture(
+        state: .working(1),
         lines: conversation,
         runs: RunProgressFixtures.runs,
         pairedName: "Nate's MacBook Pro"

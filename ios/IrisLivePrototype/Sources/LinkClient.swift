@@ -200,6 +200,30 @@ public struct LinkPairResult: Sendable, Equatable {
     public let code: String
 }
 
+/// One entry of `GET /link/status` → `voices` (LINK_API.md §13.3). Shown as
+/// "Algenib · Gravelly"; the name is the only part the token route accepts.
+public struct LinkVoice: Sendable, Equatable, Hashable, Identifiable {
+    public let name: String
+    public let style: String
+
+    public init(name: String, style: String) {
+        self.name = name
+        self.style = style
+    }
+
+    public init?(json: [String: Any]) {
+        guard let name = (json["name"] as? String)?.trimmingCharacters(in: .whitespaces),
+              !name.isEmpty else { return nil }
+        self.name = name
+        self.style = ((json["style"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    public var id: String { name }
+
+    /// §13.3 — "<name> · <style>", and just the name when the Mac sent none.
+    public var label: String { style.isEmpty ? name : "\(name) · \(style)" }
+}
+
 public struct LinkStatus: Sendable, Equatable {
     public let deviceId: String
     public let deviceName: String
@@ -208,6 +232,31 @@ public struct LinkStatus: Sendable, Equatable {
     public let liveModel: String
     public let voice: String
     public let accent: String
+    /// §13.3 — the full catalogue the picker is built from. Empty on a desktop
+    /// that predates §13, which the picker reports rather than papers over.
+    public let voices: [LinkVoice]
+    /// §13.3 — what a session token gets when the phone sends no `voice`.
+    public let defaultVoice: String
+    /// §11 — whether this Mac can push at all. `false` means registering will
+    /// succeed and no notification will ever arrive; say so.
+    public let pushConfigured: Bool
+
+    public init(
+        deviceId: String, deviceName: String, hermesReachable: Bool,
+        userName: String, liveModel: String, voice: String, accent: String,
+        voices: [LinkVoice] = [], defaultVoice: String = "", pushConfigured: Bool = false
+    ) {
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.hermesReachable = hermesReachable
+        self.userName = userName
+        self.liveModel = liveModel
+        self.voice = voice
+        self.accent = accent
+        self.voices = voices
+        self.defaultVoice = defaultVoice
+        self.pushConfigured = pushConfigured
+    }
 }
 
 public struct LinkToken: Sendable, Equatable {
@@ -223,20 +272,37 @@ public struct LinkToken: Sendable, Equatable {
     /// handle in the token, the phone is starting a NEW conversation and has
     /// to say so. It is never inferred from the request having been sent.
     public let resumed: Bool
+    /// §13.1 — the voice actually baked into this token (the catalogue's
+    /// canonical casing, or the Mac's default when none was asked for). `""`
+    /// on a desktop that predates §13.
+    public let voice: String
+    /// §13.1 — `"session"` or `"preview"`, echoed by the desktop.
+    public let purpose: String
 
     public init(
         token: String,
         expiresAt: String? = nil,
         newSessionExpiresAt: String? = nil,
         model: String = "",
-        resumed: Bool = false
+        resumed: Bool = false,
+        voice: String = "",
+        purpose: String = "session"
     ) {
         self.token = token
         self.expiresAt = expiresAt
         self.newSessionExpiresAt = newSessionExpiresAt
         self.model = model
         self.resumed = resumed
+        self.voice = voice
+        self.purpose = purpose
     }
+}
+
+/// §13.1 — what a token is for. A preview token carries no tools and no
+/// personal context, so the two must never be confused at a call site.
+public enum LinkTokenPurpose: String, Sendable {
+    case session
+    case preview
 }
 
 // MARK: - Errors
@@ -256,6 +322,15 @@ public enum LinkError: Error, Equatable {
 
     /// The desktop is reachable but could not mint a Gemini token (502).
     case tokenUnavailable
+
+    /// 400 `invalid_voice` (§13.1). The name this phone stored is not in the
+    /// Mac's catalogue any more — fall back to the default and say so.
+    case invalidVoice
+    /// 400 `invalid_purpose` (§13.1). Only reachable if the two ends disagree
+    /// about the contract.
+    case invalidPurpose
+    /// 501 `push_unavailable` — this desktop build has no push-token store.
+    case pushUnavailable
 
     // ----- The task API's named failures (LINK_API.md §4) -----
 
@@ -306,6 +381,12 @@ public enum LinkError: Error, Equatable {
             }
         case .tokenUnavailable:
             return "Your Mac could not issue a Gemini session token. Check that a Gemini API key is configured in Iris on the desktop."
+        case .invalidVoice:
+            return "Iris on your Mac does not have that voice any more."
+        case .invalidPurpose:
+            return "Iris on your Mac refused the kind of session token this app asked for. Update one of the two."
+        case .pushUnavailable:
+            return "This version of Iris on your Mac cannot register this phone for push notifications. Update Iris on the desktop."
         case .tasksUnavailable:
             return "This version of Iris on your Mac cannot take tasks from the phone. Update Iris on the desktop."
         case .taskUnknown:
@@ -348,9 +429,17 @@ public struct LinkClient: Sendable {
     private let session: URLSession
 
     public init(baseURL: URL, credential: String?, timeout: TimeInterval = 10) {
+        self.init(baseURL: baseURL, credential: credential, timeout: timeout, protocolClasses: nil)
+    }
+
+    /// Test-only seam. A unit test puts a `URLProtocol` stub in front of the
+    /// transport so the exact bytes of a request body can be asserted on
+    /// without a server. No code path in the app passes anything but nil.
+    init(baseURL: URL, credential: String?, timeout: TimeInterval = 10, protocolClasses: [AnyClass]?) {
         self.baseURL = baseURL
         self.credential = credential
         let config = URLSessionConfiguration.ephemeral
+        if let protocolClasses { config.protocolClasses = protocolClasses }
         config.waitsForConnectivity = false
         config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = timeout * 2
@@ -410,8 +499,33 @@ public struct LinkClient: Sendable {
             userName: (json["userName"] as? String) ?? "",
             liveModel: (json["liveModel"] as? String) ?? "",
             voice: (json["voice"] as? String) ?? "",
-            accent: (json["accent"] as? String) ?? ""
+            accent: (json["accent"] as? String) ?? "",
+            voices: ((json["voices"] as? [[String: Any]]) ?? []).compactMap(LinkVoice.init(json:)),
+            // §13.3: `default_voice` falls back to the desktop's `voice` only
+            // because the desktop already does that; nothing is invented here.
+            defaultVoice: (json["default_voice"] as? String) ?? "",
+            pushConfigured: (json["pushConfigured"] as? Bool) ?? false
         )
+    }
+
+    // MARK: Push registration (LINK_API.md §11)
+
+    /// `PUT /link/push-token`. Idempotent, one token per paired device.
+    /// The token is never logged and never put in an error message.
+    @discardableResult
+    public func registerPushToken(_ token: String, environment: PushEnvironment) async throws -> Bool {
+        let json = try await send(
+            path: "/link/push-token",
+            method: "PUT",
+            body: ["token": token, "environment": environment.rawValue],
+            authenticated: true
+        )
+        return (json["pushEnabled"] as? Bool) ?? false
+    }
+
+    /// `DELETE /link/push-token`. Safe when nothing is registered.
+    public func unregisterPushToken() async throws {
+        _ = try await send(path: "/link/push-token", method: "DELETE", body: nil, authenticated: true)
     }
 
     /// Mints a fresh ephemeral Gemini token. Single use, with a 60 s window to
@@ -435,10 +549,24 @@ public struct LinkClient: Sendable {
     /// A build that does not implement `resume_handle` simply omits the field
     /// and mints an ordinary fresh-conversation token, which the caller then
     /// correctly treats as a new session.
-    public func geminiToken(resumeHandle: String? = nil) async throws -> LinkToken {
+    /// `voice` is a name out of `GET /link/status` → `voices` (§13.1). It is
+    /// sent on EVERY session mint, fresh and resume alike, so a reconnect
+    /// cannot flip the voice under a conversation that is still going. An
+    /// unknown name comes back as `400 invalid_voice`, never as a silent
+    /// substitution.
+    public func geminiToken(
+        resumeHandle: String? = nil,
+        voice: String? = nil,
+        purpose: LinkTokenPurpose = .session
+    ) async throws -> LinkToken {
         var body: [String: Any] = [:]
         let handle = resumeHandle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !handle.isEmpty { body["resume_handle"] = handle }
+        let wanted = voice?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !wanted.isEmpty { body["voice"] = wanted }
+        // `session` is the default on the wire; sending it changes nothing, and
+        // omitting it keeps an older desktop's `{}` behavior exactly.
+        if purpose != .session { body["purpose"] = purpose.rawValue }
         let json = try await send(path: "/link/gemini-token", method: "POST", body: body, authenticated: true)
         guard let token = json["token"] as? String, !token.isEmpty else {
             throw LinkError.badResponse("token response carried no token")
@@ -448,7 +576,9 @@ public struct LinkClient: Sendable {
             expiresAt: json["expiresAt"] as? String,
             newSessionExpiresAt: json["newSessionExpiresAt"] as? String,
             model: (json["model"] as? String) ?? "",
-            resumed: !handle.isEmpty && (json["resumed"] as? Bool) == true
+            resumed: !handle.isEmpty && (json["resumed"] as? Bool) == true,
+            voice: (json["voice"] as? String) ?? "",
+            purpose: (json["purpose"] as? String) ?? purpose.rawValue
         )
     }
 
@@ -511,6 +641,9 @@ public struct LinkClient: Sendable {
             let detail = (json["message"] as? String) ?? ""
             switch code {
             case "token_unavailable": throw LinkError.tokenUnavailable
+            case "invalid_voice": throw LinkError.invalidVoice
+            case "invalid_purpose": throw LinkError.invalidPurpose
+            case "push_unavailable": throw LinkError.pushUnavailable
             case "tasks_unavailable": throw LinkError.tasksUnavailable
             case "task_unknown": throw LinkError.taskUnknown
             case "task_not_finished": throw LinkError.taskNotFinished
@@ -519,6 +652,7 @@ public struct LinkClient: Sendable {
             case "agent_unreachable": throw LinkError.agentUnreachable(detail)
             case "dispatch_failed": throw LinkError.dispatchFailed(detail)
             case "task_required", "task_too_long", "invalid_urgency", "invalid_decision",
+                 "invalid_token", "invalid_environment",
                  "invalid_json", "payload_too_large", "unsupported_media_type":
                 throw LinkError.invalidRequest(code)
             default:

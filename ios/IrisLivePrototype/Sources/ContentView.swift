@@ -34,6 +34,11 @@ final class PairingController: ObservableObject {
     @Published var messageIsError = false
     @Published private(set) var status: LinkStatus?
     @Published private(set) var statusMessage: String = ""
+    #if DEBUG
+    /// True when a DEBUG launch-argument fixture supplied the pairing and the
+    /// status. Always false in a release build, which has no fixtures.
+    private(set) var isPreviewSeeded = false
+    #endif
 
     init() {
         paired = KeychainStore.loadPairing()
@@ -120,6 +125,11 @@ final class PairingController: ObservableObject {
     // MARK: Status
 
     func refreshStatus() async {
+        #if DEBUG
+        // A launch-argument fixture stands in for the Mac; asking a Mac that
+        // is not there would only replace it with a failure.
+        if isPreviewSeeded { return }
+        #endif
         guard let paired else { return }
         do {
             status = try await LinkClient(paired: paired).status()
@@ -241,13 +251,23 @@ final class LiveSessionController: ObservableObject {
     /// Raised when a run this phone dispatched finishes, so the app can stop
     /// double-notifying about something Iris just said out loud.
     var onRunAnnounced: ((String) -> Void)?
+    /// Raised when the Mac refuses the voice this phone asked for (§13.1), so
+    /// the stored choice can be dropped and the user told.
+    var onVoiceRejected: (() -> Void)?
+
+    /// The voice this conversation was started with, sent on EVERY mint for
+    /// it — the reconnects included. Fixing it here rather than re-reading the
+    /// preference each time is what stops a voice change in Settings from
+    /// taking effect halfway through a sentence (§13.2: a new voice applies
+    /// from the next conversation).
+    private var sessionVoice: String?
 
     // MARK: Start
 
     /// The paired path: fetch a single-use token from the Mac, then connect
     /// with it. The token is never stored and never reused — it is minted with
     /// `uses: 1` and a 60 s window to start a session.
-    func startWithLink(paired: PairedDesktop, model: String) {
+    func startWithLink(paired: PairedDesktop, model: String, voice: String?) {
         guard !isRunning else { return }
         reset()
         pairedDesktop = paired
@@ -255,6 +275,7 @@ final class LiveSessionController: ObservableObject {
         isRunning = true
         policy = ReconnectPolicy()
         resumeHandle = nil
+        sessionVoice = voice
         sessionLoop = Task { [weak self] in
             await self?.runLinkedSessionLoop(paired: paired, model: model)
         }
@@ -284,7 +305,16 @@ final class LiveSessionController: ObservableObject {
             // ---- a fresh single-use token, carrying the handle if we have one ----
             let minted: LinkToken
             do {
-                minted = try await LinkClient(paired: paired).geminiToken(resumeHandle: resumeHandle)
+                minted = try await LinkClient(paired: paired)
+                    .geminiToken(resumeHandle: resumeHandle, voice: sessionVoice, purpose: .session)
+            } catch LinkError.invalidVoice {
+                // The catalogue changed under a stored choice. Drop it, tell
+                // the user, and carry on with the Mac's default rather than
+                // ending a conversation over a voice.
+                sessionVoice = nil
+                onVoiceRejected?()
+                note("your Mac no longer has that voice — using its default one")
+                continue
             } catch {
                 let linkError = error as? LinkError
                 // `not_paired` ends the session exactly as it always has: the
@@ -810,6 +840,11 @@ struct ContentView: View {
     @StateObject private var runs = RunsController()
     @Environment(\.scenePhase) private var scenePhase
 
+    @StateObject private var voiceStore = VoiceChoiceStore()
+    @StateObject private var router = NotificationRouter.shared
+    @StateObject private var push = PushRegistrar.shared
+    @StateObject private var preview = VoicePreviewController()
+
     @State private var apiKey: String = KeychainStore.loadKey() ?? ""
     @State private var keySaved: Bool = KeychainStore.loadKey() != nil
     /// Developer fallback only. A paired session's voice is baked into the
@@ -841,7 +876,10 @@ struct ContentView: View {
         }
         .onAppear {
             #if DEBUG
-            if let fixture { pairing._previewSeed(desktopName: fixture.pairedName) }
+            if let fixture {
+                pairing._previewSeed(desktopName: fixture.pairedName)
+                pairing._previewSeed(status: fixture)
+            }
             switch PreviewFixture.screenFromLaunchArguments() {
             case "settings": showSettings = true
             case "runs": showRuns = true
@@ -860,22 +898,61 @@ struct ContentView: View {
             controller.onRunAnnounced = { [runs] runId in
                 runs.notifier.markHandled(runId)
             }
+            controller.onVoiceRejected = { [voiceStore, pairing] in
+                voiceStore.fallBackToMacDefault(macDefault: pairing.status?.defaultVoice ?? "")
+            }
+            router.notifier = runs.notifier
+            // §13.5: previews are refused outright while a session is live.
+            preview.isSessionLive = { [controller] in controller.isRunning }
+            #if DEBUG
+            // A fixture run has no Mac behind it. Asking one for runs, a
+            // status or a push registration would only replace the fixture
+            // with a refusal.
+            if fixture != nil { return }
+            #endif
             runs.configure(paired: pairing.paired)
+            push.configure(paired: pairing.paired)
             Task {
                 await pairing.refreshStatus()
+                push.noteStatus(pairing.status)
+                // §11.3 step 1: re-register on every launch. Idempotent, one
+                // request, and it is what survives a restore or an OS update.
+                await push.refreshOnLaunch(notifier: runs.notifier)
                 await runs.refresh(notifying: true)
                 if !controller.isRunning { runs.startPolling() }
             }
         }
-        .onChange(of: pairing.paired) { _, paired in
+        .onChange(of: pairing.paired) { previous, paired in
             runs.configure(paired: paired)
+            push.configure(paired: paired)
+            if paired == nil { Task { await push.unpairing() } }
+            // Just paired: this is the first moment notifications mean
+            // anything, and the user has just chosen to connect the two
+            // devices, so the prompt has a reason the user can see. Never at
+            // cold launch, and never before the QR is confirmed.
+            if previous == nil, paired != nil {
+                Task { await push.enable(notifier: runs.notifier) }
+            }
             if paired == nil { runs.stopPolling() } else { runs.startPolling() }
         }
         .onChange(of: controller.runs) { _, list in
             // The live session already polled; keep one list, not two.
             if !list.isEmpty { runs.adopt(list) }
         }
+        .onChange(of: pairing.status?.defaultVoice) { _, _ in
+            push.noteStatus(pairing.status)
+            // A catalogue that no longer carries the stored name is the same
+            // refusal §13.1 sends, just noticed earlier.
+            if voiceStore.isStale(against: pairing.status?.voices ?? []) {
+                voiceStore.fallBackToMacDefault(macDefault: pairing.status?.defaultVoice ?? "")
+            }
+        }
+        .onChange(of: controller.announcingRunId) { _, runId in
+            // §11.5: a run the user is already hearing about must not banner.
+            router.announcingRunId = runId
+        }
         .onChange(of: controller.isRunning) { _, running in
+            if running { preview.stop() }
             // The session's own 2 s poll replaces the quiet background watch.
             if running { runs.stopPolling() } else { runs.startPolling() }
             if running { BackgroundSession.begin { controller.stop() } } else { BackgroundSession.end() }
@@ -884,16 +961,22 @@ struct ContentView: View {
             guard phase == .active, pairing.paired != nil else { return }
             Task { await runs.refresh(notifying: true) }
         }
-        .onChange(of: runs.notifier.openRunId) { _, runId in
-            guard let runId, !runId.isEmpty else { return }
-            runs.notifier.openRunId = nil
-            Task { await runs.read(runId) }
+        // A tapped notification, local or pushed, from a cold launch, the
+        // background or the foreground: open THAT run's detail screen.
+        .onChange(of: router.opened) { _, notice in
+            guard let notice else { return }
+            router.opened = nil
+            showRuns = true
+            Task { await runs.open(notice: notice) }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(
                 pairing: pairing,
                 session: controller,
                 runs: runs,
+                voiceStore: voiceStore,
+                preview: preview,
+                push: push,
                 apiKey: $apiKey,
                 keySaved: $keySaved,
                 voice: $voice
@@ -930,12 +1013,21 @@ struct ContentView: View {
 
     private func startSession() {
         if let paired = pairing.paired {
+            // A preview and a session cannot share the audio path (§13.5).
+            preview.stop()
             // Notifications only start mattering once this phone has work in
             // flight, so this is where they are asked for.
-            Task { await runs.notifier.requestPermissionIfNeeded() }
+            Task {
+                await runs.notifier.requestPermissionIfNeeded()
+                if runs.notifier.permission == .granted {
+                    await push.enable(notifier: runs.notifier)
+                }
+            }
             controller.startWithLink(
                 paired: paired,
-                model: pairing.status?.liveModel ?? ""
+                model: pairing.status?.liveModel ?? "",
+                // §13.4: sent on every session mint for this conversation.
+                voice: voiceStore.requestedVoice
             )
         } else {
             let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -951,13 +1043,35 @@ extension PairingController {
     /// placeholder record straight to the published property and never touches
     /// the Keychain, the Link client or any session path.
     func _previewSeed(desktopName: String?) {
-        guard let desktopName, paired == nil else { return }
+        guard let desktopName else { return }
+        // Overwrite whatever is really stored: a fixture run must show the
+        // fixture, not a stale pairing left in the simulator's Keychain.
+        isPreviewSeeded = true
         paired = PairedDesktop(
             host: "100.101.102.103",
             port: 8765,
             deviceId: "preview",
             credential: "",
             desktopName: desktopName
+        )
+    }
+
+    /// Dresses the Voice and Notifications sections without a Mac to ask.
+    /// Writes straight to the published property; no client, no network.
+    func _previewSeed(status fixture: PreviewFixture) {
+        guard paired != nil, !fixture.voices.isEmpty else { return }
+        isPreviewSeeded = true
+        status = LinkStatus(
+            deviceId: "preview",
+            deviceName: "Preview iPhone",
+            hermesReachable: true,
+            userName: "Nate",
+            liveModel: "models/gemini-3.1-flash-live-preview",
+            voice: fixture.defaultVoice,
+            accent: fixture.accent,
+            voices: fixture.voices,
+            defaultVoice: fixture.defaultVoice,
+            pushConfigured: fixture.pushConfigured
         )
     }
 }

@@ -23,8 +23,13 @@ final class RunProgressUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 10), "the active run's row should be listed")
         row.tap()
 
-        // Pushed inside the Runs sheet's own stack, so the run id is the title.
-        XCTAssertTrue(app.navigationBars["run-8f21a0c4d9"].waitForExistence(timeout: 10))
+        // Pushed inside the Runs sheet's own stack. The title is a readable
+        // summary of the task; the run id is small print at the bottom.
+        let title = app.navigationBars.containing(
+            NSPredicate(format: "identifier CONTAINS[c] 'Audit the workspace dependencies'")
+        ).firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 10), "the title should summarise the task")
+        XCTAssertFalse(app.navigationBars["run-8f21a0c4d9"].exists, "the run id is not the title")
         XCTAssertTrue(app.staticTexts["Running code"].waitForExistence(timeout: 5),
                       "the live headline should be on screen")
         XCTAssertTrue(app.buttons["5 steps, expanded"].waitForExistence(timeout: 5),

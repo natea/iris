@@ -17,6 +17,67 @@ import Foundation
 
 // MARK: - Models
 
+/// `pending_approval` on `GET /link/tasks` and `GET /link/tasks/:id`
+/// (LINK_API.md §11.5), or nil when nothing is pending.
+///
+/// It comes from the desktop's real run state — something Hermes actually
+/// asked for — and is never inferred. `requestId` matches the one in a
+/// `needs_attention` push for the same request, so a push and a poll can be
+/// reconciled.
+public struct PendingApproval: Sendable, Equatable, Hashable {
+    public let requestId: String
+    /// Untrusted text from Hermes: display only, never executed or followed.
+    /// A secret prompt never repeats its question here.
+    public let summary: String
+    /// `false` means this is a Hermes interaction Link cannot carry (a
+    /// clarification, a sudo password, a secret). Say it needs the Mac; never
+    /// offer to answer it from the phone.
+    public let canApproveFromPhone: Bool
+
+    public init(requestId: String, summary: String, canApproveFromPhone: Bool) {
+        self.requestId = requestId
+        self.summary = summary
+        self.canApproveFromPhone = canApproveFromPhone
+    }
+
+    public init?(json: Any?) {
+        guard let object = json as? [String: Any] else { return nil }
+        let requestId = ((object["request_id"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = ((object["summary"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Neither field alone is enough to put a decision in front of someone:
+        // without a request id there is nothing to reconcile, and without a
+        // summary there is nothing to describe. A half-formed block is dropped
+        // rather than shown as a blank approval.
+        guard !requestId.isEmpty, !summary.isEmpty else { return nil }
+        self.requestId = requestId
+        self.summary = summary
+        self.canApproveFromPhone = (object["can_approve_from_phone"] as? Bool) ?? false
+    }
+}
+
+/// The four answers `POST /link/tasks/:id/approval` accepts (§4).
+public enum ApprovalDecision: String, Sendable, CaseIterable {
+    case once
+    case session
+    case always
+    case deny
+
+    /// What the button says. Deliberately plain: the user is answering for a
+    /// terminal-capable agent.
+    public var buttonTitle: String {
+        switch self {
+        case .once: return "Allow once"
+        case .session: return "Allow for this session"
+        case .always: return "Always allow"
+        case .deny: return "Deny"
+        }
+    }
+
+    public var isDenial: Bool { self == .deny }
+}
+
 /// One entry of `GET /link/tasks`.
 public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
     public let runId: String
@@ -33,13 +94,16 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
     public let headline: String
     /// §12.1 — steps currently retained for the run (at most 60).
     public let stepCount: Int
+    /// §11.5 — what this run is waiting on, or nil.
+    public let pendingApproval: PendingApproval?
 
     public var id: String { runId }
 
     public init(
         runId: String, task: String, status: String, origin: String,
         createdAt: Double = 0, updatedAt: Double = 0, announcedAt: Double = 0,
-        headline: String = "", stepCount: Int = 0
+        headline: String = "", stepCount: Int = 0,
+        pendingApproval: PendingApproval? = nil
     ) {
         self.runId = runId
         self.task = task
@@ -50,7 +114,11 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
         self.announcedAt = announcedAt
         self.headline = headline
         self.stepCount = stepCount
+        self.pendingApproval = pendingApproval
     }
+
+    /// True when Hermes is waiting on the user for this run.
+    public var needsAttention: Bool { pendingApproval != nil }
 
     public var isTerminal: Bool { LinkRunStatus.isTerminal(status) }
 
@@ -67,6 +135,7 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
         self.announcedAt = LinkTask.number(json["announced_at"])
         self.headline = (json["headline"] as? String) ?? ""
         self.stepCount = LinkTask.integer(json["step_count"]) ?? 0
+        self.pendingApproval = PendingApproval(json: json["pending_approval"])
     }
 
     static func number(_ value: Any?) -> Double {
@@ -111,10 +180,13 @@ public struct LinkTaskStatus: Sendable, Equatable {
     public let instructions: String
     public let output: String?
     public let error: String?
+    /// §11.5 — what this run is waiting on, or nil.
+    public let pendingApproval: PendingApproval?
 
     public init(
         runId: String, task: String = "", origin: String = "",
-        status: String, instructions: String = "", output: String? = nil, error: String? = nil
+        status: String, instructions: String = "", output: String? = nil, error: String? = nil,
+        pendingApproval: PendingApproval? = nil
     ) {
         self.runId = runId
         self.task = task
@@ -123,6 +195,7 @@ public struct LinkTaskStatus: Sendable, Equatable {
         self.instructions = instructions
         self.output = output
         self.error = error
+        self.pendingApproval = pendingApproval
     }
 
     public var isTerminal: Bool { LinkRunStatus.isTerminal(status) }
@@ -202,7 +275,8 @@ extension LinkClient: LinkTaskService {
             status: (json["status"] as? String) ?? "",
             instructions: (json["instructions"] as? String) ?? "",
             output: json["output"] as? String,
-            error: json["error"] as? String
+            error: json["error"] as? String,
+            pendingApproval: PendingApproval(json: json["pending_approval"])
         )
     }
 
@@ -414,7 +488,8 @@ public struct LinkTaskDetail: Sendable, Equatable {
             status: (json["status"] as? String) ?? "",
             instructions: (json["instructions"] as? String) ?? "",
             output: json["output"] as? String,
-            error: json["error"] as? String
+            error: json["error"] as? String,
+            pendingApproval: PendingApproval(json: json["pending_approval"])
         )
         self.headline = (json["headline"] as? String) ?? ""
         self.stepCount = LinkTask.integer(json["step_count"]) ?? 0

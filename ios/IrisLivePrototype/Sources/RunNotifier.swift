@@ -5,18 +5,24 @@
 //  Local notifications for runs this phone dispatched that finish while no
 //  Live session is running.
 //
-//  Be honest about what iOS can do here. There is no push server in this
-//  prototype, so a notification can only be scheduled by code that is actually
-//  executing. In practice that means:
+//  There is now real push as well (LINK_API.md §11, PushService.swift), and
+//  the two overlap deliberately rather than by accident:
 //
-//    - while the app is in the foreground, or
-//    - during the short window iOS keeps it alive after backgrounding, or
-//    - on the next launch/foreground, when `refresh()` sees the finished run.
+//    - the Mac pushes six seconds after a phone-dispatched run finishes, and
+//      skips the push entirely if the phone acked the announcement first;
+//    - this file still raises a local banner for a completion the app sees
+//      itself — which is what covers a Mac with no APNs key configured, and a
+//      run that finished while the app was open and quiet.
 //
-//  If the phone is locked with the app fully suspended for an hour, the
-//  completion is NOT delivered at that moment; it is delivered the next time
-//  the app runs. That is a real limitation of the prototype, not a bug to hide
-//  behind a cheerful message.
+//  So every completion has two possible sources, and exactly one banner is
+//  allowed to reach the user. `notified` is the ledger that guarantees it: a
+//  push claims the run through `markHandled` before this ever runs, and a run
+//  that already has a delivered notification is skipped below.
+//
+//  If the phone is locked with the app suspended and the Mac cannot push, the
+//  completion is still not delivered at that moment; it is delivered the next
+//  time the app runs. That is a real limitation, not a bug to hide behind a
+//  cheerful message.
 //
 //  If the user refuses notification permission, nothing here pretends
 //  otherwise: `permission` becomes `.denied`, the run still appears in the run
@@ -36,8 +42,6 @@ public final class RunNotifier: NSObject, ObservableObject {
     }
 
     @Published public private(set) var permission: Permission = .unknown
-    /// Set when a notification is tapped, so the view can open that run.
-    @Published public var openRunId: String?
 
     /// Runs this phone has already raised a notification for. Kept locally,
     /// separate from the desktop's `announced` ledger: that one belongs to the
@@ -54,10 +58,15 @@ public final class RunNotifier: NSObject, ObservableObject {
 
     public override init() {
         super.init()
-        #if canImport(UserNotifications)
-        center.delegate = self
-        #endif
+        // The delegate is installed once at launch by `IrisAppDelegate`, which
+        // is what lets a tap from a cold start arrive. This object just lends
+        // the router its ledger.
+        NotificationRouter.shared.notifier = self
     }
+
+    /// Whether a banner has already been raised — or claimed by a push — for
+    /// this run.
+    public func hasNotified(_ runId: String) -> Bool { notified.contains(runId) }
 
     /// Asked for at the moment it first means something: the user has just
     /// sent real work to Hermes from this phone, so a completion banner is
@@ -99,8 +108,7 @@ public final class RunNotifier: NSObject, ObservableObject {
     /// notified about, so the caller never claims more than happened.
     @discardableResult
     public func notifyIfNeeded(_ runs: [LinkTask]) async -> [String] {
-        let candidates = runs.filter { $0.isTerminal && $0.isFromThisPhone && !notified.contains($0.runId) }
-        guard !candidates.isEmpty else { return [] }
+        guard !Self.candidates(from: runs, notified: notified).isEmpty else { return [] }
         guard permission == .granted else {
             // Refused or not yet asked: the run still shows in the list and we
             // record nothing, so a later grant can still deliver it.
@@ -108,12 +116,26 @@ public final class RunNotifier: NSObject, ObservableObject {
         }
         var delivered: [String] = []
         #if canImport(UserNotifications)
+        // A push that arrived while the app was suspended is already on the
+        // user's screen. Same run, same banner: never a second one.
+        let onScreen = Self.runIds(ofDelivered: await center.deliveredNotifications())
+        let candidates = Self.candidates(from: runs, notified: notified, alreadyOnScreen: onScreen)
+        // Runs skipped because a push already covered them are recorded, not
+        // delivered: the ledger is what stops them being reconsidered on every
+        // poll, and the caller must not be told they buzzed.
+        let covered = Self.candidates(from: runs, notified: notified)
+            .map(\.runId)
+            .filter { onScreen.contains($0) }
         for run in candidates {
             let content = UNMutableNotificationContent()
             content.title = Self.title(for: run.status)
             content.body = Self.body(for: run)
             content.sound = .default
-            content.userInfo = ["run_id": run.runId]
+            // The same identity a push carries (§11.4 sets `thread-id` and
+            // `apns-collapse-id` to the run id), so a later push for this run
+            // replaces this banner instead of stacking on it.
+            content.threadIdentifier = run.runId
+            content.userInfo = ["run_id": run.runId, "kind": PushNotice.Kind.runComplete.rawValue]
             let request = UNNotificationRequest(
                 identifier: "iris.run.\(run.runId)",
                 content: content,
@@ -127,9 +149,27 @@ public final class RunNotifier: NSObject, ObservableObject {
                 continue
             }
         }
+        if !covered.isEmpty { notified.formUnion(covered) }
         #endif
         if !delivered.isEmpty { notified.formUnion(delivered) }
         return delivered
+    }
+
+    // MARK: De-duplication (pure, so it can be tested without iOS)
+
+    /// The runs a local banner is owed: terminal, dispatched by this phone,
+    /// not already in the ledger, and not already on screen from a push.
+    nonisolated static func candidates(
+        from runs: [LinkTask],
+        notified: Set<String>,
+        alreadyOnScreen: Set<String> = []
+    ) -> [LinkTask] {
+        runs.filter {
+            $0.isTerminal
+                && $0.isFromThisPhone
+                && !notified.contains($0.runId)
+                && !alreadyOnScreen.contains($0.runId)
+        }
     }
 
     /// A run already spoken aloud in a live session should not also buzz.
@@ -139,7 +179,22 @@ public final class RunNotifier: NSObject, ObservableObject {
         notified = current
     }
 
-    static func title(for status: String) -> String {
+    #if canImport(UserNotifications)
+    /// The run ids already showing in Notification Centre, from a push or from
+    /// an earlier local banner. Both carry the run id as the thread id.
+    nonisolated static func runIds(ofDelivered delivered: [UNNotification]) -> Set<String> {
+        Set(delivered.compactMap { item -> String? in
+            if let notice = PushNotice(userInfo: item.request.content.userInfo),
+               notice.kind == .runComplete {
+                return notice.runId
+            }
+            let thread = item.request.content.threadIdentifier
+            return thread.isEmpty ? nil : thread
+        })
+    }
+    #endif
+
+    nonisolated static func title(for status: String) -> String {
         switch status.lowercased() {
         case "completed": return "Hermes finished"
         case "failed", "error": return "Hermes failed"
@@ -148,7 +203,7 @@ public final class RunNotifier: NSObject, ObservableObject {
         }
     }
 
-    static func body(for run: LinkTask) -> String {
+    nonisolated static func body(for run: LinkTask) -> String {
         let firstLine = run.task
             .split(separator: "\n")
             .map(String.init)
@@ -158,29 +213,3 @@ public final class RunNotifier: NSObject, ObservableObject {
         return trimmed.count > 120 ? String(trimmed.prefix(117)) + "…" : trimmed
     }
 }
-
-#if canImport(UserNotifications)
-extension RunNotifier: UNUserNotificationCenterDelegate {
-
-    /// Show the banner even while the app is foregrounded: the user may be
-    /// looking at something else in it.
-    nonisolated public func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
-    }
-
-    /// Tapping a completion opens that run's result.
-    nonisolated public func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse
-    ) async {
-        let runId = response.notification.request.content.userInfo["run_id"] as? String
-        await MainActor.run { [weak self] in
-            guard let runId, !runId.isEmpty else { return }
-            self?.openRunId = runId
-        }
-    }
-}
-#endif

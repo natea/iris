@@ -45,7 +45,34 @@ enum RunProgressFixtures {
         createdAt: ms(900), updatedAt: ms(30), headline: "", stepCount: 0
     )
 
-    static let runs: [LinkTask] = [activeRun, failingRun, blindRun, finishedRun]
+    /// §11.5 — a run stopped on an approval Hermes actually asked for.
+    static let waitingRun = LinkTask(
+        runId: "run-6d04bb92c1",
+        task: "Goal: Clear the stale build output before the release build.",
+        status: "running", origin: "device:abc",
+        createdAt: ms(210), updatedAt: ms(6), headline: "Waiting for you", stepCount: 2,
+        pendingApproval: PendingApproval(
+            requestId: "approval:9f3c41",
+            summary: "Hermes wants to run: rm -rf build",
+            canApproveFromPhone: true
+        )
+    )
+
+    /// The other half of §11.5: something Link cannot carry, so there are no
+    /// buttons — only "answer it on the Mac".
+    static let macOnlyRun = LinkTask(
+        runId: "run-7c15da3b02",
+        task: "Goal: Install the updated signing certificate.",
+        status: "running", origin: "device:abc",
+        createdAt: ms(400), updatedAt: ms(11), headline: "Waiting for you", stepCount: 1,
+        pendingApproval: PendingApproval(
+            requestId: "approval:2ab7e0",
+            summary: "Hermes needs a credential entered on the Mac before it can carry on.",
+            canApproveFromPhone: false
+        )
+    )
+
+    static let runs: [LinkTask] = [waitingRun, activeRun, failingRun, macOnlyRun, blindRun, finishedRun]
 
     // MARK: Details
 
@@ -121,8 +148,38 @@ enum RunProgressFixtures {
         stepsComplete: false, stepsTruncated: false, steps: []
     )
 
+    static let waiting = LinkTaskDetail(
+        task: LinkTaskStatus(runId: waitingRun.runId, task: waitingRun.task, origin: waitingRun.origin,
+                             status: "running", instructions: "The run is STILL IN PROGRESS.",
+                             pendingApproval: waitingRun.pendingApproval),
+        headline: "Waiting for you",
+        stepCount: 2, stepsCursor: 2, stepsComplete: true, stepsTruncated: false,
+        steps: [
+            RunStep(id: "s1", index: 1, tool: "read_file", category: .file,
+                    label: "build/", preview: "/Users/nate/code/iris/build",
+                    status: .done, startedAtMs: ms(200), durationMs: 310),
+            RunStep(id: "s2", index: 2, tool: "Terminal", category: .code,
+                    label: "rm -rf build", preview: "rm -rf build",
+                    status: .running, startedAtMs: ms(9), durationMs: nil)
+        ]
+    )
+
+    static let macOnly = LinkTaskDetail(
+        task: LinkTaskStatus(runId: macOnlyRun.runId, task: macOnlyRun.task, origin: macOnlyRun.origin,
+                             status: "running", pendingApproval: macOnlyRun.pendingApproval),
+        headline: "Waiting for you",
+        stepCount: 1, stepsCursor: 1, stepsComplete: true, stepsTruncated: false,
+        steps: [
+            RunStep(id: "s1", index: 1, tool: "Terminal", category: .code,
+                    label: "security import", preview: "security import cert.p12 -k login.keychain",
+                    status: .running, startedAtMs: ms(10), durationMs: nil)
+        ]
+    )
+
     static func detail(for runId: String) -> LinkTaskDetail? {
         switch runId {
+        case waitingRun.runId:  return waiting
+        case macOnlyRun.runId:  return macOnly
         case activeRun.runId:   return active
         case failingRun.runId:  return failing
         case finishedRun.runId: return finished

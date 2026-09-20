@@ -151,7 +151,18 @@ struct RunsScreen: View {
             .overlay {
                 if controller.isReadingResult { ProgressView().controlSize(.large) }
             }
+            .onChange(of: controller.pendingOpen) { _, run in
+                // A tapped notification lands here: push that run's detail,
+                // replacing whatever was on the stack.
+                guard let run else { return }
+                controller.pendingOpen = nil
+                path = [run]
+            }
             .onAppear {
+                if let run = controller.pendingOpen {
+                    controller.pendingOpen = nil
+                    path = [run]
+                }
                 #if DEBUG
                 // `-uiPreviewRun <runId>` opens straight onto a run's progress
                 // so it can be screenshotted without tapping. DEBUG only, and
@@ -172,10 +183,12 @@ struct RunsScreen: View {
         if injectedRuns != nil, let canned = RunProgressFixtures.detail(for: run.runId) {
             RunDetailView(run: run, detail: canned, result: RunProgressFixtures.result(for: run.runId))
         } else {
-            RunDetailView(run: run, service: controller.taskClient)
+            RunDetailView(run: run, service: controller.taskClient,
+                          highlightRequestId: controller.pendingOpenRequestId)
         }
         #else
-        RunDetailView(run: run, service: controller.taskClient)
+        RunDetailView(run: run, service: controller.taskClient,
+                      highlightRequestId: controller.pendingOpenRequestId)
         #endif
     }
 
@@ -206,7 +219,7 @@ struct RunRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: run.statusSymbol)
+            RunStatusIcon(symbol: run.statusSymbol, isActive: !run.isTerminal)
                 .foregroundStyle(run.statusColor)
                 .font(.body)
                 .frame(width: 22)
@@ -218,6 +231,13 @@ struct RunRow: View {
                     .font(.subheadline)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+                // §11.5: a run Hermes is waiting on says so here, in the list,
+                // so it is not something only a notification could tell you.
+                if run.needsAttention {
+                    Label("Hermes is waiting for you", systemImage: "hand.raised.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -238,13 +258,18 @@ struct RunRow: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(run.displayTitle)
-        .accessibilityValue([subtitle, liveLine].compactMap { $0 }.joined(separator: " · "))
+        .accessibilityValue(
+            ([run.needsAttention ? "Hermes is waiting for you" : nil, subtitle, liveLine])
+                .compactMap { $0 }.joined(separator: " · ")
+        )
     }
 
     private var subtitle: String {
         var parts = [run.status.capitalized, run.originLabel]
         if let time = run.relativeTime { parts.append(time) }
         if isAnnouncing { parts.append("Iris is reading this out") }
+        // NOT "waiting for you" again: the orange label above already says it,
+        // and the desktop's headline usually says it a third time.
         return parts.joined(separator: " · ")
     }
 
@@ -276,7 +301,14 @@ struct ActiveRunsStrip: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(active) { run in
                         HStack(spacing: 8) {
-                            ProgressView().controlSize(.mini)
+                            if run.needsAttention {
+                                Image(systemName: "hand.raised.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                                    .accessibilityHidden(true)
+                            } else {
+                                ProgressView().controlSize(.mini)
+                            }
                             Text(run.displayTitle)
                                 .font(.caption)
                                 .lineLimit(2)
@@ -298,7 +330,11 @@ struct ActiveRunsStrip: View {
                 .irisGlass(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(active.count) active Hermes run\(active.count == 1 ? "" : "s")")
+            .accessibilityLabel(
+                active.contains(where: \.needsAttention)
+                    ? "\(active.count) active Hermes run\(active.count == 1 ? "" : "s"), one is waiting for you"
+                    : "\(active.count) active Hermes run\(active.count == 1 ? "" : "s")"
+            )
             .accessibilityHint("Opens the run list")
         }
     }

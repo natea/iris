@@ -15,6 +15,9 @@ struct SettingsView: View {
     @ObservedObject var pairing: PairingController
     @ObservedObject var session: LiveSessionController
     @ObservedObject var runs: RunsController
+    @ObservedObject var voiceStore: VoiceChoiceStore
+    @ObservedObject var preview: VoicePreviewController
+    @ObservedObject var push: PushRegistrar
 
     @Binding var apiKey: String
     @Binding var keySaved: Bool
@@ -29,6 +32,7 @@ struct SettingsView: View {
             Form {
                 if let paired = pairing.paired {
                     pairedSection(paired)
+                    voiceSection(paired)
                 } else {
                     unpairedSection
                 }
@@ -56,6 +60,10 @@ struct SettingsView: View {
             ) {
                 Button("Unpair this phone", role: .destructive) {
                     session.stop()
+                    preview.stop()
+                    // §11.2: tell the Mac to stop pushing while the credential
+                    // still works.
+                    Task { await push.unpairing() }
                     pairing.unpair()
                 }
                 Button("Cancel", role: .cancel) {}
@@ -172,18 +180,187 @@ struct SettingsView: View {
         .accessibilityLabel("Step \(number). \(text)")
     }
 
+
+    // MARK: Voice (LINK_API.md §13)
+
+    /// The catalogue comes from the Mac (`GET /link/status` → `voices`); this
+    /// screen never hardcodes a voice name. The choice is stored locally and
+    /// sent with every session token — but only from the NEXT conversation,
+    /// which the footer says out loud because §13.2 makes it true.
+    @ViewBuilder
+    private func voiceSection(_ paired: PairedDesktop) -> some View {
+        let catalogue = pairing.status?.voices ?? []
+        let macDefault = pairing.status?.defaultVoice ?? ""
+
+        Section {
+            if catalogue.isEmpty {
+                Label(
+                    pairing.status == nil
+                        ? "Checking which voices your Mac has…"
+                        : "This version of Iris on your Mac does not offer a voice list. Its own setting decides how Iris sounds.",
+                    systemImage: pairing.status == nil ? "clock" : "info.circle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            } else {
+                // "Mac default (Zephyr)" is a real choice, not the absence of
+                // one: picking it sends no `voice` at all, so the phone
+                // follows whatever the Mac is set to from then on.
+                voiceRow(
+                    name: nil,
+                    title: macDefault.isEmpty ? "Mac default" : "Mac default (\(macDefault))",
+                    paired: paired,
+                    previewName: macDefault
+                )
+                ForEach(catalogue) { voice in
+                    voiceRow(name: voice.name, title: voice.label, paired: paired, previewName: voice.name)
+                }
+            }
+
+            if let accent = pairing.status?.accent, !accent.isEmpty {
+                LabeledContent("Accent") {
+                    Text(accent).foregroundStyle(.secondary)
+                }
+                .accessibilityHint("Set in Iris on the Mac")
+            }
+
+            // Inline, in the section, rather than floating over a row: a
+            // failure has to be readable without hiding the next voice.
+            if let failure = preview.failure {
+                Label("\(failure.voice): \(failure.message)", systemImage: "exclamationmark.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !voiceStore.fallbackNotice.isEmpty {
+                Label(voiceStore.fallbackNotice, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if session.isRunning {
+                Label(
+                    "Iris is in a conversation, so previews are off. A conversation keeps the voice it started with.",
+                    systemImage: "waveform"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if !preview.caption.isEmpty {
+                Text(preview.caption)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("Voice")
+        } footer: {
+            Text(voiceFooter)
+        }
+    }
+
+    private var voiceFooter: String {
+        let accentLine = (pairing.status?.accent).map { $0.isEmpty ? "" : " The accent is set in Iris on the Mac." } ?? ""
+        return "A new voice applies from your next conversation — the one you are in keeps the voice it started with."
+            + accentLine
+    }
+
+    @ViewBuilder
+    private func voiceRow(name: String?, title: String, paired: PairedDesktop, previewName: String) -> some View {
+        let isSelected = voiceStore.selected == name
+        let isBusy = preview.isBusy(with: previewName)
+        HStack(spacing: 12) {
+            Button {
+                voiceStore.select(name)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                        .accessibilityHidden(true)
+                    Text(title)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+            .accessibilityIdentifier("voice-\(name ?? "mac-default")")
+            .accessibilityValue(isSelected ? "Selected" : "Not selected")
+
+            if !previewName.isEmpty {
+                Button {
+                    preview.play(voice: previewName, paired: paired)
+                } label: {
+                    if isBusy {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "play.circle")
+                            .font(.title3)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(session.isRunning || (preview.isBusy && !isBusy))
+                .accessibilityLabel(isBusy ? "Stop the preview of \(previewName)" : "Hear \(previewName)")
+                .accessibilityIdentifier("preview-\(previewName)")
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
     // MARK: Notifications
 
+    /// Permission, registration and what the Mac can actually do (§11). Every
+    /// line here is state that was observed, never a promise: a phone can be
+    /// permitted and registered and still never buzz, because the Mac has no
+    /// APNs key — and that is what `pushConfigured` is for.
     private var notificationsSection: some View {
         Section {
-            LabeledContent("When a run finishes") {
+            LabeledContent("Permission") {
                 Text(permissionLabel).font(.footnote).foregroundStyle(permissionColor)
             }
             .accessibilityElement(children: .combine)
 
+            if pairing.paired != nil {
+                LabeledContent("Push from your Mac") {
+                    Text(push.stateLabel)
+                        .font(.footnote)
+                        .foregroundStyle(pushColor)
+                        .multilineTextAlignment(.trailing)
+                }
+                .accessibilityElement(children: .combine)
+
+                LabeledContent("Your Mac can push") {
+                    Text(macPushLabel).font(.footnote).foregroundStyle(macPushColor)
+                }
+                .accessibilityElement(children: .combine)
+
+                if !push.tokenSummary.isEmpty {
+                    LabeledContent("Device token") {
+                        Text(push.tokenSummary)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityHidden(true)
+                }
+            }
+
             switch runs.notifier.permission {
             case .granted:
-                EmptyView()
+                if pairing.paired != nil {
+                    if push.isEnabled {
+                        Button("Turn off notifications from your Mac", role: .destructive) {
+                            Task { await push.disable() }
+                        }
+                    } else {
+                        Button("Get notified by your Mac") {
+                            Task { await push.enable(notifier: runs.notifier) }
+                        }
+                    }
+                }
             case .denied, .unavailable:
                 Button("Open iOS Settings") {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -192,15 +369,59 @@ struct SettingsView: View {
                 }
             case .unknown:
                 Button("Allow notifications") {
-                    Task { await runs.notifier.requestPermissionIfNeeded() }
+                    Task {
+                        // Paired: ask, then register with the Mac in one step.
+                        // Unpaired: still worth asking — local banners for a
+                        // finished run do not need a Mac.
+                        if pairing.paired != nil {
+                            await push.enable(notifier: runs.notifier)
+                        } else {
+                            await runs.notifier.requestPermissionIfNeeded()
+                        }
+                    }
                 }
+            }
+
+            if let problem = push.problem {
+                Label(problem, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Without this, a run that finishes while Iris is closed waits in the Runs list instead of buzzing.")
+            Text("Your Mac sends a notification when a run you started here finishes, or when Hermes needs your answer. A run Iris is already reading out to you does not also buzz.")
         }
-        .task { await runs.notifier.refreshPermission() }
+        .task {
+            await runs.notifier.refreshPermission()
+            push.noteStatus(pairing.status)
+        }
+    }
+
+    private var pushColor: Color {
+        switch push.state {
+        case .registered: return .green
+        case .failed: return .orange
+        case .registering: return .secondary
+        case .notRegistered: return .secondary
+        }
+    }
+
+    private var macPushLabel: String {
+        switch push.macPushConfigured {
+        case .some(true): return "Set up"
+        case .some(false): return "Not set up"
+        case .none: return "Unknown"
+        }
+    }
+
+    private var macPushColor: Color {
+        switch push.macPushConfigured {
+        case .some(true): return .green
+        case .some(false): return .orange
+        case .none: return .secondary
+        }
     }
 
     private var permissionLabel: String {

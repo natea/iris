@@ -13,6 +13,15 @@
 //    · no events → no steps, and the screen says so in plain words;
 //    · no percentage. Hermes reports none, so the bar is indeterminate.
 //
+//  It is also where a pending approval is answered (§11.5). That path is
+//  deliberately different from the spoken one: the dispatch gate in §6 exists
+//  because a model can mishear a person, and nothing here goes through it,
+//  because nothing here is heard. An approval is sent only when a finger taps
+//  Approve or Deny and then confirms a dialog that restates the command
+//  verbatim. There is no code path from a tool call, a transcript, a push, or
+//  any other model output to `resolve(_:)` — the model cannot reach this
+//  screen's buttons, and the buttons are the only caller.
+//
 
 import SwiftUI
 
@@ -26,6 +35,12 @@ final class RunDetailController: ObservableObject {
     @Published private(set) var result: String?
     @Published private(set) var isStopping = false
     @Published var message = ""
+    /// Set while an approval is being sent, so the buttons cannot be tapped
+    /// twice into two decisions.
+    @Published private(set) var isResolving = false
+    /// What the last approval did, in plain words. Never a claim that a
+    /// decision landed when it did not.
+    @Published var approvalOutcome = ""
 
     /// The list entry the screen opened from, so there is something honest to
     /// draw before the first poll returns.
@@ -45,6 +60,12 @@ final class RunDetailController: ObservableObject {
     }
 
     var isActive: Bool { !LinkRunStatus.isTerminal(currentStatus) }
+
+    /// §11.5 — live state only. The seed's copy is used until the first poll
+    /// returns so the card does not flash in a moment after a push.
+    var pendingApproval: PendingApproval? {
+        status?.pendingApproval ?? (status == nil ? seed.pendingApproval : nil)
+    }
 
     /// §12: an empty headline is not filled in with a guess.
     var headline: String {
@@ -130,6 +151,34 @@ final class RunDetailController: ObservableObject {
         }
     }
 
+    /// The ONLY caller is the confirmed Approve/Deny button in this screen.
+    /// §4: this route resolves the approval exactly as the desktop's own
+    /// buttons do, so the human gate is the phone's responsibility — here it
+    /// is a deliberate tap plus a confirmation that restates the command.
+    func resolve(_ decision: ApprovalDecision) async {
+        guard let service, !isResolving else { return }
+        isResolving = true
+        defer { isResolving = false }
+        do {
+            try await service.resolveApproval(runId: runId, decision: decision.rawValue)
+            approvalOutcome = decision.isDenial
+                ? "Denied. Hermes has been told no."
+                : "Approved (\(decision.rawValue)). Hermes is carrying on."
+            message = ""
+            await fetchOnce()
+        } catch LinkError.approvalNotPending {
+            approvalOutcome = ""
+            message = "Hermes has no pending approval for this run any more — it was already answered on the Mac, or it timed out."
+            await fetchOnce()
+        } catch let error as LinkError {
+            approvalOutcome = ""
+            message = error.message
+        } catch {
+            approvalOutcome = ""
+            message = "Could not send that decision to Hermes."
+        }
+    }
+
     func stop() async {
         guard let service else { return }
         isStopping = true
@@ -171,22 +220,33 @@ struct RunDetailView: View {
     @State private var stepsExpanded = true
     @State private var isAtBottom = true
     @State private var confirmStop = false
+    /// The approval awaiting a second, explicit confirmation. Nothing is sent
+    /// while these are nil, and only a tap can set them.
+    @State private var confirmApproval: PendingApproval?
+    @State private var confirmDenial: PendingApproval?
 
     /// nil in every production path; set only by a DEBUG fixture.
     private let injected: LinkTaskDetail?
     private let injectedResult: String?
 
-    init(run: LinkTask, service: LinkTaskService?) {
+    /// `highlightRequestId` is the request a `needs_attention` push named. It
+    /// is used only to confirm the card on screen is the one the notification
+    /// was about; a mismatch is reported rather than silently answered.
+    init(run: LinkTask, service: LinkTaskService?, highlightRequestId: String? = nil) {
         _controller = StateObject(wrappedValue: RunDetailController(seed: run, service: service))
         injected = nil
         injectedResult = nil
+        self.highlightRequestId = highlightRequestId
     }
+
+    private let highlightRequestId: String?
 
     #if DEBUG
     init(run: LinkTask, detail: LinkTaskDetail, result: String? = nil) {
         _controller = StateObject(wrappedValue: RunDetailController(seed: run, service: nil))
         injected = detail
         injectedResult = result
+        self.highlightRequestId = nil
     }
     #endif
 
@@ -194,11 +254,13 @@ struct RunDetailView: View {
         ScrollViewReader { proxy in
             List {
                 headerSection
+                approvalSection
                 briefSection
                 if controller.isActive { liveSection }
                 stepsSection
                 noticeSection
                 resultSection
+                runIdFooter
             }
             .listStyle(.insetGrouped)
             .onChange(of: controller.progress.steps.last?.id) { previous, newest in
@@ -212,7 +274,9 @@ struct RunDetailView: View {
                 withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(newest, anchor: .bottom) }
             }
         }
-        .navigationTitle(shortRunId)
+        // A person recognizes the task, not the id; the id is kept, small, at
+        // the bottom for debugging.
+        .navigationTitle(RunTitle.summary(of: controller.seed.task))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .task(id: controller.runId) {
@@ -238,6 +302,113 @@ struct RunDetailView: View {
         } message: {
             Text("Hermes will stop where it is. Anything it has already done stays done.")
         }
+        // Two taps, and the command is restated in full on the second one: the
+        // whole point of the gate is that nobody approves something they have
+        // not just read.
+        .confirmationDialog(
+            "Let Hermes do this?",
+            isPresented: Binding(get: { confirmApproval != nil }, set: { if !$0 { confirmApproval = nil } }),
+            titleVisibility: .visible,
+            presenting: confirmApproval
+        ) { approval in
+            ForEach(ApprovalDecision.allCases.filter { !$0.isDenial }, id: \.rawValue) { decision in
+                Button(decision.buttonTitle) {
+                    confirmApproval = nil
+                    Task { await controller.resolve(decision) }
+                }
+            }
+            Button("Cancel", role: .cancel) { confirmApproval = nil }
+        } message: { approval in
+            Text(approval.summary)
+        }
+        .confirmationDialog(
+            "Deny this?",
+            isPresented: Binding(get: { confirmDenial != nil }, set: { if !$0 { confirmDenial = nil } }),
+            titleVisibility: .visible,
+            presenting: confirmDenial
+        ) { _ in
+            Button("Deny", role: .destructive) {
+                confirmDenial = nil
+                Task { await controller.resolve(.deny) }
+            }
+            Button("Cancel", role: .cancel) { confirmDenial = nil }
+        } message: { approval in
+            Text(approval.summary)
+        }
+    }
+
+    // MARK: Approval (LINK_API.md §11.5)
+
+    @ViewBuilder
+    private var approvalSection: some View {
+        if let approval = controller.pendingApproval {
+            Section {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Hermes is waiting for you", systemImage: "hand.raised.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.orange)
+
+                    // Hermes' own words, shown and never followed.
+                    Text(approval.summary)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+
+                    if approval.canApproveFromPhone {
+                        Text("Answering here does exactly what the buttons in Iris on your Mac do.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 10) {
+                            Button("Approve…") { confirmApproval = approval }
+                                .buttonStyle(.borderedProminent)
+                            Button("Deny…", role: .destructive) { confirmDenial = approval }
+                                .buttonStyle(.bordered)
+                            if controller.isResolving { ProgressView().controlSize(.mini) }
+                        }
+                        .disabled(controller.isResolving)
+                        .padding(.top, 2)
+                    } else {
+                        // §4: clarifications, sudo and secrets travel over
+                        // Hermes' interactive socket, which Link does not
+                        // carry. There is no route, so there is no button.
+                        Label(
+                            "This one has to be answered in Iris on your Mac. Iris Link cannot carry it.",
+                            systemImage: "desktopcomputer"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let mismatch = requestMismatchNotice(approval) {
+                        Text(mismatch)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, 4)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Hermes is waiting for you. \(approval.summary)")
+            }
+        } else if !controller.approvalOutcome.isEmpty {
+            Section {
+                Label(controller.approvalOutcome, systemImage: "checkmark.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The notification named one request; the run is now waiting on another.
+    /// Say so rather than let a tap answer something it was not about.
+    private func requestMismatchNotice(_ approval: PendingApproval) -> String? {
+        guard let highlightRequestId, !highlightRequestId.isEmpty,
+              highlightRequestId != approval.requestId else { return nil }
+        return "The notification you tapped was about an earlier question. This is what Hermes is waiting on now."
     }
 
     // MARK: Sections
@@ -274,7 +445,7 @@ struct RunDetailView: View {
 
     private var statusChip: some View {
         HStack(spacing: 5) {
-            Image(systemName: seedForChip.statusSymbol)
+            RunStatusIcon(symbol: seedForChip.statusSymbol, isActive: controller.isActive)
                 .font(.caption2.weight(.bold))
             Text(controller.currentStatus.uppercased())
                 .font(.caption2.weight(.semibold))
@@ -456,6 +627,21 @@ struct RunDetailView: View {
                 }
                 .accessibilityLabel("Share or copy this result")
             }
+        }
+    }
+
+    /// The id is for debugging and for quoting to an assistant, not for reading:
+    /// small, grey, selectable, and out of the way at the bottom.
+    private var runIdFooter: some View {
+        Section {
+            EmptyView()
+        } footer: {
+            Text("Run \(controller.runId)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .accessibilityLabel("Run identifier \(controller.runId)")
         }
     }
 

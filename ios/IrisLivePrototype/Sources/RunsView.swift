@@ -30,6 +30,13 @@ final class RunsController: ObservableObject {
     /// plainly instead of implying the user was told.
     @Published var notificationsUnavailable = false
 
+    /// A run a tapped notification asked for. The Runs screen pushes its
+    /// detail and clears this.
+    @Published var pendingOpen: LinkTask?
+    /// The pending request id a `needs_attention` tap arrived with, so the
+    /// detail screen can surface that approval rather than a stale one.
+    @Published var pendingOpenRequestId: String?
+
     let notifier = RunNotifier()
 
     private var paired: PairedDesktop?
@@ -44,8 +51,13 @@ final class RunsController: ObservableObject {
     }
 
     func configure(paired: PairedDesktop?) {
-        self.paired = paired
-        if paired == nil {
+        // A record with no credential cannot ask the Mac anything — every
+        // call would come back `not_paired` and clear the pairing. That is
+        // what a DEBUG screenshot fixture looks like, and treating it as
+        // unpaired here is simpler and safer than special-casing fixtures.
+        let usable = (paired?.credential.isEmpty == false) ? paired : nil
+        self.paired = usable
+        if usable == nil {
             runs = []
             stopPolling()
         }
@@ -122,6 +134,39 @@ final class RunsController: ObservableObject {
             message = error.message
         } catch {
             message = "Could not read that result."
+        }
+    }
+
+    /// A tapped notification (local or push) names a run. Open THAT run's
+    /// detail screen — never a summary, and never a result read out of the
+    /// notification, which does not contain one (§11.3).
+    ///
+    /// The run is usually already in the list. When it is not — a push that
+    /// arrived while the app was asleep, opened from a cold launch — the
+    /// status route supplies a seed. If even that fails, nothing is opened and
+    /// the reason is shown; a blank screen with a run id on it would be worse.
+    func open(notice: PushNotice) async {
+        pendingOpenRequestId = notice.requestId.isEmpty ? nil : notice.requestId
+        if let known = runs.first(where: { $0.runId == notice.runId }) {
+            pendingOpen = known
+            return
+        }
+        guard let client else { return }
+        do {
+            let status = try await client.taskStatus(runId: notice.runId)
+            pendingOpen = LinkTask(
+                runId: status.runId,
+                task: status.task,
+                status: status.status,
+                origin: status.origin.isEmpty ? "device:" : status.origin,
+                pendingApproval: status.pendingApproval
+            )
+            await refresh(notifying: false)
+        } catch let error as LinkError {
+            message = error.message
+            if error.clearsPairing { onLinkError?(error) }
+        } catch {
+            message = "Could not open that run."
         }
     }
 
