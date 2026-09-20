@@ -414,26 +414,76 @@ final class UserControlConfirmationTests: XCTestCase {
         await coordinator.close()
     }
 
-    func testAReconnectTakesTheButtonsAwayWithTheProposal() async throws {
+    /// Seen on device: Gemini's ten-minute reset wiped the card and the buttons
+    /// while the user was still reading the brief. A pending question must
+    /// survive a reconnect on screen — and only the TAP may still confirm it.
+    func testAReconnectKeepsTheQuestionOnScreenAndOnlyATapCanStillConfirmIt() async throws {
         let link = FakeLinkService()
         let first = FakeTransport()
         let coordinator = makeCoordinator(link, first)
         await coordinator.handle(.setupComplete)
         let router = await coordinator.toolRouter
         let id = try await stage(router)
+        // Everything the VOICE path needs was in place before the drop.
+        await router.modelTurnComplete()
+        _ = await router.userTurnObserved("yes, send it")
 
         let second = FakeTransport()
         await coordinator.reattach(transport: second, resumed: true)
         await coordinator.handle(.setupComplete)
 
-        // Nothing is staged, so there is nothing for a button to act on, and a
-        // tap that was already in the air dispatches nothing.
+        // The brief is still there, unchanged.
         let staged = await router.pendingProposal()
-        XCTAssertNil(staged)
+        XCTAssertEqual(staged?.id, id, "the question must not vanish from the screen")
+
+        // A spoken yes from before the drop no longer counts: the model has to
+        // stage and re-read before its own submit is accepted.
+        let submitted = await router.handle(LiveToolCall(
+            id: "c9", name: "submit_hermes_task", args: ["proposal_id": id]
+        ))
+        XCTAssertEqual(submitted?["status"] as? String, "blocked")
+        var count = await link.dispatchCount()
+        XCTAssertEqual(count, 0, "a reconnect must never confirm anything by voice")
+
+        // The tap still works, because the complete brief is on screen.
         let outcome = await coordinator.answerStagedProposal(.yes, proposalId: id)
-        XCTAssertEqual(outcome, .stale)
-        let count = await link.dispatchCount()
-        XCTAssertEqual(count, 0)
+        guard case .sent = outcome else { return XCTFail("expected the tap to send, got \(outcome)") }
+        count = await link.dispatchCount()
+        XCTAssertEqual(count, 1, "exactly one dispatch")
+        let cleared = await router.pendingProposal()
+        XCTAssertNil(cleared)
+        await coordinator.close()
+    }
+
+    /// A completion must not be spoken over "Should I send that?".
+    func testACompletionIsHeldWhileAQuestionIsWaitingAndSpokenAfterTheAnswer() async throws {
+        let link = FakeLinkService()
+        await link.setStatus(.success(LinkTaskStatus(runId: "run-0", status: "completed")), for: "run-0")
+        await link.setResult(
+            .success(LinkTaskResult(runId: "run-0", task: "earlier", status: "completed",
+                                    output: "Earlier task finished.", instructions: "")),
+            for: "run-0")
+        let transport = FakeTransport()
+        let coordinator = makeCoordinator(link, transport)
+        await coordinator.handle(.setupComplete)
+        let router = await coordinator.toolRouter
+
+        let id = try await stage(router)          // a question is now on screen
+        await coordinator.handle(.turnComplete)   // Iris has finished asking it
+        await coordinator.track(runId: "run-0")   // …and an earlier run finishes
+
+        try? await Task.sleep(nanoseconds: 2_600_000_000)   // more than one poll
+        var spoken = await transport.turns().contains { $0.contains("run_id: run-0") }
+        XCTAssertFalse(spoken, "the completion must wait while a question is pending")
+
+        _ = await coordinator.answerStagedProposal(.no, proposalId: id)
+        await coordinator.handle(.turnComplete)   // Iris acknowledges the decline
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline && !spoken {
+            spoken = await transport.turns().contains { $0.contains("run_id: run-0") }
+            if !spoken { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        XCTAssertTrue(spoken, "held, not dropped: it is announced once the question is answered")
         await coordinator.close()
     }
 

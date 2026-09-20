@@ -135,6 +135,36 @@ public struct DispatchGate: Sendable, Equatable {
     /// A fresh Live session (not a resume) clears anything staged.
     public mutating func reset() { proposal = nil }
 
+    /// A RECONNECT must not make a pending question vanish from the user's
+    /// screen (seen on device: Gemini's ten-minute reset wiped the card and the
+    /// buttons while the user was still reading the brief).
+    ///
+    /// What a reconnect genuinely destroys is the evidence the VOICE path
+    /// depends on — that the whole brief was read back and the user then
+    /// answered in a turn of their own. So that evidence is thrown away: the
+    /// stage becomes `readbackInterrupted`, which `claim` refuses until the
+    /// model stages and re-reads the brief. A reconnect can therefore never
+    /// turn an unconfirmed proposal into a confirmed one.
+    ///
+    /// The brief itself is kept, under the new session id, because the BUTTON
+    /// path needs none of that evidence: the complete brief is on screen at the
+    /// moment of the tap. The five-minute expiry still runs from the original
+    /// staging time.
+    public mutating func carryAcrossReconnect(sessionId: String, now: Date = Date()) {
+        expire(now)
+        guard let current = proposal else { return }
+        proposal = Proposal(
+            id: current.id,
+            task: current.task,
+            urgency: current.urgency,
+            sessionId: sessionId.trimmingCharacters(in: .whitespacesAndNewlines),
+            stage: .readbackInterrupted,
+            proposedAt: current.proposedAt,
+            userResponse: "",
+            userTurnObserved: false
+        )
+    }
+
     // MARK: Reads
 
     public mutating func pendingProposal(now: Date = Date()) -> Proposal? {

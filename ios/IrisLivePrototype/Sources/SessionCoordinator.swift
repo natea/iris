@@ -223,10 +223,14 @@ public actor SessionCoordinator {
         // again"). Either way the model re-reads the brief and waits for a
         // real answer.
         if isReconnect && !connectionResumed { sessionId = UUID().uuidString }
-        await router.resetSession(sessionId: sessionId)
+        await router.resetSession(sessionId: sessionId, isReconnect: isReconnect)
         if isReconnect {
-            notify(.pendingProposal(nil))
-            notify(.log("reconnected (\(connectionResumed ? "same conversation" : "new conversation")) — any staged proposal was invalidated"))
+            // The card and the buttons stay: a pending question never silently
+            // disappears. A spoken "yes" no longer counts until Iris re-reads
+            // the brief; a tap still does.
+            await publishPendingProposal()
+            let kept = await router.pendingProposal() != nil
+            notify(.log("reconnected (\(connectionResumed ? "same conversation" : "new conversation")) — \(kept ? "the staged proposal is still on screen; a spoken yes needs a fresh read-back" : "nothing was staged")"))
         }
 
         let coordinator = self
@@ -670,6 +674,11 @@ public actor SessionCoordinator {
 
     private func drainAnnouncements() async {
         guard !closed, inFlightAnnouncement == nil, !modelTurnActive else { return }
+        // A question on screen is never talked over: a completion arriving now
+        // would land on top of "Should I send that?" and bury it. It is held,
+        // not dropped — the 2 s poll calls this again, and the proposal either
+        // gets answered or expires after five minutes.
+        guard await router.pendingProposal() == nil else { return }
         guard !announcementQueue.isEmpty else { return }
         let next = announcementQueue.removeFirst()
         inFlightAnnouncement = next

@@ -286,16 +286,21 @@ public actor ToolRouter {
     }
 
     /// A fresh Live session (not a resume) clears everything staged.
-    public func resetSession(sessionId: String) {
+    public func resetSession(sessionId: String, isReconnect: Bool = false) {
         self.sessionId = sessionId
-        gate.reset()
         approvalGate.reset()
         cancelledCalls.removeAll()
-        // A proposal cannot survive a reconnect, so neither can the ledger
-        // that answers for it. Runs already dispatched keep running; they are
-        // tracked by run id, which this never held.
-        dispatchLedger.removeAll()
-        dispatchesInFlight.removeAll()
+        if isReconnect {
+            // The staged brief stays on the user's screen; only the voice
+            // path's evidence is discarded (see `carryAcrossReconnect`). The
+            // ledger is kept with it, so a tap after the reconnect is still
+            // exactly-once against a dispatch that landed just before it.
+            gate.carryAcrossReconnect(sessionId: sessionId)
+        } else {
+            gate.reset()
+            dispatchLedger.removeAll()
+            dispatchesInFlight.removeAll()
+        }
     }
 
     // MARK: Observability for the UI
