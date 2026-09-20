@@ -49,6 +49,20 @@
                ReferencedContainer = "container:IrisLivePrototype.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "09048342072E79A066435B38"
+               BuildableName = "IrisWidgets.appex"
+               BlueprintName = "IrisWidgets"
+               ReferencedContainer = "container:IrisLivePrototype.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction

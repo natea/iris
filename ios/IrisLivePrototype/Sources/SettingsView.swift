@@ -18,6 +18,8 @@ struct SettingsView: View {
     @ObservedObject var voiceStore: VoiceChoiceStore
     @ObservedObject var preview: VoicePreviewController
     @ObservedObject var push: PushRegistrar
+    @ObservedObject var liveActivity: LiveActivityController
+    @ObservedObject var widgets: WidgetBridge
 
     @Binding var apiKey: String
     @Binding var keySaved: Bool
@@ -41,6 +43,8 @@ struct SettingsView: View {
                 answerButtonsSection
 
                 notificationsSection
+
+                liveActivitySection
 
                 if pairing.paired == nil {
                     developerSection
@@ -420,6 +424,93 @@ struct SettingsView: View {
             await runs.notifier.refreshPermission()
             push.noteStatus(pairing.status)
         }
+    }
+
+    // MARK: Live Activity and widget (LINK_API.md §14)
+
+    /// Three facts and one switch. Every line is something that was observed —
+    /// iOS's own permission, whether an activity is actually running, whether
+    /// the Mac has been told how to update it — because "Live Activities: on"
+    /// with no token registered is exactly the state that looks like it works
+    /// and never updates.
+    private var liveActivitySection: some View {
+        Section {
+            LabeledContent("Allowed by iOS") {
+                Text(liveActivity.systemAllows ? "Yes" : "No")
+                    .font(.footnote)
+                    .foregroundStyle(liveActivity.systemAllows ? .green : .orange)
+            }
+            .accessibilityElement(children: .combine)
+
+            Toggle(isOn: Binding(
+                get: { liveActivity.isEnabled },
+                set: { liveActivity.setEnabled($0) }
+            )) {
+                Text("Show Hermes on the Lock Screen")
+            }
+            .disabled(!liveActivity.systemAllows)
+            .accessibilityIdentifier("live-activity-toggle")
+
+            if liveActivity.isEnabled && liveActivity.systemAllows {
+                LabeledContent("Live Activity") {
+                    Text(liveActivity.stateLabel)
+                        .font(.footnote)
+                        .foregroundStyle(liveActivity.isStale ? .orange : .secondary)
+                        .multilineTextAlignment(.trailing)
+                }
+                .accessibilityElement(children: .combine)
+
+                LabeledContent("Update token") {
+                    Text(liveActivity.tokenSummary.isEmpty ? "Not registered" : liveActivity.tokenSummary)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityHidden(true)
+
+                LabeledContent("Start-from-locked token") {
+                    Text(liveActivity.startTokenSummary.isEmpty ? "Not registered" : liveActivity.startTokenSummary)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityHidden(true)
+            }
+
+            if !liveActivity.systemAllows {
+                Button("Open iOS Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            }
+
+            if let problem = liveActivity.problem {
+                Label(problem, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            LabeledContent("Home-screen widget") {
+                Text(widgetStateLabel)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
+            .accessibilityElement(children: .combine)
+        } header: {
+            Text("Live Activity & widget")
+        } footer: {
+            Text(liveActivity.systemAllows
+                 ? "The Lock Screen activity updates in real time while Hermes works, and says so when your Mac stops reporting. To add the widget: touch and hold the Home Screen, tap Edit › Add Widget, and search for Iris. The widget is refreshed by iOS on its own schedule, so it always shows how old its information is."
+                 : "Live Activities are turned off for Iris in iOS Settings, so nothing will appear on the Lock Screen. The home-screen widget still works.")
+        }
+    }
+
+    private var widgetStateLabel: String {
+        guard widgets.isSharedStorageAvailable else { return "Shared storage unavailable" }
+        guard let snapshot = widgets.currentSnapshot(), snapshot.paired else { return "No data yet" }
+        if let age = snapshot.ageLine() { return age }
+        return "Up to date"
     }
 
     private var pushColor: Color {

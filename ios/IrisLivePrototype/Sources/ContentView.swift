@@ -916,6 +916,8 @@ struct ContentView: View {
     @StateObject private var router = NotificationRouter.shared
     @StateObject private var push = PushRegistrar.shared
     @StateObject private var preview = VoicePreviewController()
+    @StateObject private var liveActivity = LiveActivityController.shared
+    @StateObject private var widgets = WidgetBridge.shared
 
     @State private var apiKey: String = KeychainStore.loadKey() ?? ""
     @State private var keySaved: Bool = KeychainStore.loadKey() != nil
@@ -944,6 +946,21 @@ struct ContentView: View {
             )
         }
         .onOpenURL { url in
+            // Two schemes, two parsers, no overlap: `iris://` comes from this
+            // app's own Live Activity or widget, `iris-link://` carries a
+            // pairing secret from a QR code (§14.8).
+            if let destination = IrisRunLink.parse(url) {
+                switch destination {
+                case .run(let runId):
+                    showRuns = true
+                    Task { await runs.openFromDeepLink(runId: runId) }
+                case .runs:
+                    showRuns = true
+                case .app:
+                    break
+                }
+                return
+            }
             pairing.handle(url: url)
         }
         .onAppear {
@@ -992,6 +1009,8 @@ struct ContentView: View {
             #endif
             runs.configure(paired: pairing.paired)
             push.configure(paired: pairing.paired)
+            liveActivity.configure(paired: pairing.paired)
+            widgets.configure(paired: pairing.paired)
             Task {
                 await pairing.refreshStatus()
                 push.noteStatus(pairing.status)
@@ -999,13 +1018,23 @@ struct ContentView: View {
                 // request, and it is what survives a restore or an OS update.
                 await push.refreshOnLaunch(notifier: runs.notifier)
                 await runs.refresh(notifying: true)
+                // §14.6 step 2: the app is the widget's only source of fresh
+                // data, so every launch pays for one cheap summary.
+                await widgets.refresh(force: true)
                 if !controller.isRunning { runs.startPolling() }
             }
         }
         .onChange(of: pairing.paired) { previous, paired in
             runs.configure(paired: paired)
             push.configure(paired: paired)
-            if paired == nil { Task { await push.unpairing() } }
+            liveActivity.configure(paired: paired)
+            widgets.configure(paired: paired)
+            if paired == nil {
+                Task { await push.unpairing() }
+                // End the activity and DELETE its tokens while the credential
+                // still works (§14.7).
+                Task { await liveActivity.unpairing() }
+            }
             // Just paired: this is the first moment notifications mean
             // anything, and the user has just chosen to connect the two
             // devices, so the prompt has a reason the user can see. Never at
@@ -1018,6 +1047,13 @@ struct ContentView: View {
         .onChange(of: controller.runs) { _, list in
             // The live session already polled; keep one list, not two.
             if !list.isEmpty { runs.adopt(list) }
+        }
+        // One place where a changed run list drives the two background
+        // surfaces: the Live Activity is updated locally (§14.5 — a push can
+        // simply not arrive), and the widget's snapshot is refreshed.
+        .onChange(of: runs.runs) { _, list in
+            liveActivity.observe(runs: list)
+            Task { await widgets.refresh() }
         }
         .onChange(of: pairing.status?.defaultVoice) { _, _ in
             push.noteStatus(pairing.status)
@@ -1038,14 +1074,28 @@ struct ContentView: View {
             if running { BackgroundSession.begin { controller.stop() } } else { BackgroundSession.end() }
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active, pairing.paired != nil else { return }
-            Task { await runs.refresh(notifying: true) }
+            // §14.4: the phone may start an activity locally only while it is
+            // in front. From the background it waits for the Mac's
+            // push-to-start instead of trying and being refused.
+            liveActivity.setAppActive(phase == .active)
+            if phase != .active {
+                widgets.scheduleBackgroundRefresh()
+                return
+            }
+            guard pairing.paired != nil else { return }
+            Task {
+                await runs.refresh(notifying: true)
+                await widgets.refresh(force: true)
+            }
         }
         // A tapped notification, local or pushed, from a cold launch, the
         // background or the foreground: open THAT run's detail screen.
         .onChange(of: router.opened) { _, notice in
             guard let notice else { return }
             router.opened = nil
+            // A push in the foreground means the Mac has news; the widget's
+            // snapshot is stale by definition at that moment (§14.6 step 2).
+            Task { await widgets.refresh(force: true) }
             showRuns = true
             Task { await runs.open(notice: notice) }
         }
@@ -1057,6 +1107,8 @@ struct ContentView: View {
                 voiceStore: voiceStore,
                 preview: preview,
                 push: push,
+                liveActivity: liveActivity,
+                widgets: widgets,
                 apiKey: $apiKey,
                 keySaved: $keySaved,
                 voice: $voice

@@ -211,6 +211,36 @@ final class RunsController: ObservableObject {
         }
     }
 
+    /// A deep link from the Live Activity or the home-screen widget
+    /// (`iris://run/<id>`, §14.8). The id came from a payload this phone did
+    /// not author, so it is validated before it is used and an id that does
+    /// not look like a run id opens nothing at all.
+    func openFromDeepLink(runId: String) async {
+        guard IrisRunLink.isValidRunId(runId) else { return }
+        pendingOpenRequestId = nil
+        if let known = runs.first(where: { $0.runId == runId }) {
+            pendingOpen = known
+            return
+        }
+        guard let client else { return }
+        do {
+            let status = try await client.taskStatus(runId: runId)
+            pendingOpen = LinkTask(
+                runId: status.runId,
+                task: status.task,
+                status: status.status,
+                origin: status.origin.isEmpty ? "device:" : status.origin,
+                pendingApproval: status.pendingApproval
+            )
+            await refresh(notifying: false)
+        } catch let error as LinkError {
+            message = error.message
+            if error.clearsPairing { onLinkError?(error) }
+        } catch {
+            message = "Could not open that run."
+        }
+    }
+
     /// Runs only while no Live session is active. A session of its own polls
     /// on the contract's 2 s cadence; this is the quieter background watch.
     func startPolling() {

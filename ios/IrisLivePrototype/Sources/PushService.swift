@@ -43,7 +43,19 @@ final class IrisAppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         // Must happen before the app finishes launching, or the response to a
         // notification that launched the app is never delivered.
-        MainActor.assumeIsolated { NotificationRouter.shared.install() }
+        MainActor.assumeIsolated {
+            NotificationRouter.shared.install()
+            // LINK_API.md §14.8, and the race it names: an activity the Mac
+            // started by push exists on the lock screen but CANNOT be updated
+            // until this app registers its update token. So adoption happens
+            // here — before any view is built, before the pairing controller
+            // has refreshed — reading the pairing straight from the Keychain.
+            LiveActivityController.shared.bootstrap()
+            // BGTaskScheduler refuses any registration made after launch
+            // finishes, so this has to be here even though the task itself is
+            // best-effort and is never promised to the user.
+            WidgetBridge.shared.registerBackgroundRefresh()
+        }
         return true
     }
 

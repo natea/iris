@@ -236,6 +236,27 @@ public protocol LinkTaskService: Sendable {
     func stopTask(runId: String) async throws -> String
     func resolveApproval(runId: String, decision: String) async throws
     func markAnnounced(runId: String) async throws
+
+    // ----- Live Activity and widget (LINK_API.md §14.6 / §14.7) -----
+    //
+    // REQUIREMENTS for the same reason as `taskStatus(runId:stepsSince:)`
+    // above: `LiveActivityController` holds this protocol as an existential,
+    // and a method that lives only in a protocol extension is dispatched
+    // statically to that extension's default — so the real `LinkClient`
+    // implementation would never run and no token would ever reach the Mac.
+    // The defaults below exist only so older test doubles still compile; they
+    // refuse loudly rather than succeeding quietly.
+
+    /// `GET /link/summary` — the home-screen widget's data source.
+    func summary() async throws -> LinkSummary
+    /// `PUT /link/live-activity/start-token` — the per-device push-to-start token.
+    func registerLiveActivityStartToken(_ token: String, environment: PushEnvironment) async throws -> Bool
+    /// `DELETE /link/live-activity/start-token`.
+    func unregisterLiveActivityStartToken() async throws
+    /// `PUT /link/live-activity` — the per-activity update token.
+    func registerLiveActivityToken(activityId: String, token: String, environment: PushEnvironment) async throws -> Bool
+    /// `DELETE /link/live-activity[?activity_id=…]`. Nil clears them all.
+    func unregisterLiveActivity(activityId: String?) async throws
 }
 
 // MARK: - LinkClient conformance

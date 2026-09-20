@@ -31,9 +31,24 @@ struct PreviewFixture {
 
     /// nil in release, and nil in debug unless `-uiPreviewState <name>` was
     /// passed on launch.
+    #if DEBUG
+    nonisolated(unsafe) private static var didResetSettingsForFixture = false
+    #endif
+
     static func fromLaunchArguments() -> PreviewFixture? {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
+        // A fixture launch is a test or a screenshot, and must start from the
+        // defaults a new user gets. Settings persist in the simulator between
+        // UI tests, so a test that switched to left-handed silently broke every
+        // later test that assumed the right-handed default. Only ever runs with
+        // a fixture argument, so a real user's settings are never touched.
+        // Once per launch: the root view can be re-created mid-test, and a second
+        // reset would undo the change a test just made on purpose.
+        if args.contains("-uiPreviewState"), !didResetSettingsForFixture {
+            didResetSettingsForFixture = true
+            UserDefaults.standard.removeObject(forKey: Handedness.storageKey)
+        }
         guard let index = args.firstIndex(of: "-uiPreviewState"),
               index + 1 < args.count else { return nil }
         return named(args[index + 1])

@@ -16,5 +16,15 @@
 	     not need this. -->
 	<key>com.apple.developer.usernotifications.time-sensitive</key>
 	<true/>
+	<!-- LINK_API.md §14.7. The widget extension is a separate process with a
+	     separate Keychain access group, so it cannot read the pairing
+	     credential — and must not be handed one. The app fetches
+	     GET /link/summary and writes a small NON-SECRET snapshot (counts, two
+	     titles, a flag) into this container; the extension only reads it.
+	     That is the only thing this group is for. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.app.iris.liveprototype</string>
+	</array>
 </dict>
 </plist>

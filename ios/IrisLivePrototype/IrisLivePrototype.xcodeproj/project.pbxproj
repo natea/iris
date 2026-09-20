@@ -7,24 +7,41 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0089792744ABF919DB2F660F /* LinkLiveActivityRouteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6155B1B22EE93F99799A4D54 /* LinkLiveActivityRouteTests.swift */; };
 		0450E9051ABA8EBDFE8DADE4 /* IrisLivePrototypeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */; };
 		073996C4A43D6AB3B765C34F /* ReconnectPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADBFD96EDF21736525752D0E /* ReconnectPolicy.swift */; };
+		083D13DECF7C695DFBE98F98 /* IrisActivityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 209E7D5C5FC6330EC33DDEEA /* IrisActivityViews.swift */; };
+		09865000C12922AB23046B7D /* LinkSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11212B064F9D9B41EDAC319C /* LinkSummary.swift */; };
 		0C951F8FCEB1B3DDE3AD8DF8 /* PushToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92F61B4A1FB9F053E6D68A8B /* PushToken.swift */; };
 		1284C4336804CE98EE37990F /* MarkdownBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA9E2F7177CCE0655924686 /* MarkdownBlockTests.swift */; };
+		12A2E50AAC73A478CFE7C68F /* IrisRunLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9ADE559F09D0CBCB31EA268 /* IrisRunLink.swift */; };
+		149871568B3295D082BB3877 /* IrisWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F87834D49BB7F51A666C3B3 /* IrisWidgetsBundle.swift */; };
+		15C5476C539EB0C34FAD2B7B /* IrisSummaryWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70E4BBB261A7BBCDB06EADA5 /* IrisSummaryWidget.swift */; };
+		1AEF6DF92531E588770BDF56 /* LiveActivityControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51D6FF339954AB35BDC3796 /* LiveActivityControllerTests.swift */; };
 		1DB87B9E702363F81F1BD330 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC018E366B66DFA8E826526 /* SettingsView.swift */; };
+		1E1C2C4DFD3FA91A0BEFB637 /* PresentationSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B55BFED162EE5FDA167C127 /* PresentationSnapshotTests.swift */; };
 		210FC7326FB9E5E3999363C9 /* RunPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48D18DE262A5BA94B75B1E28 /* RunPresentation.swift */; };
 		228C1E798940A67A180B4126 /* ReconnectPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 032B7C60102E5FE420222C68 /* ReconnectPolicyTests.swift */; };
 		242F33237CA96DEB30F0D166 /* SessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42DF4B8978A738812ADC7459 /* SessionCoordinator.swift */; };
+		2522C92D54485313E91C47A6 /* IrisWidgetSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBD2A6DE860C68679748FD7 /* IrisWidgetSnapshot.swift */; };
 		306F17CF209EA9FD83960288 /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8775E3B82E471D52AED945 /* AudioEngine.swift */; };
 		30C24039DA90DFE03E075F90 /* ToolRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3852C1772D95F3A6EC9237BE /* ToolRouterTests.swift */; };
 		313692B7B2F8C0FFCBA954E3 /* RunDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8651963969E1450F1C34BEF1 /* RunDetailView.swift */; };
 		35B631934B4C18267DF34582 /* RunProgressFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD96A45D465FF49D4CE142CE /* RunProgressFixtures.swift */; };
+		36829DD8B03A685FD0CBADC2 /* LiveActivitySettingsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5043FC8561B02B5E6BEA113 /* LiveActivitySettingsUITests.swift */; };
+		3C0C83B453501DE20C88078C /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF160FE6DDB35C4E237EC4F8 /* LiveActivityController.swift */; };
+		3D3F4F9F73859EFCBEDD2ABA /* IrisActivityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 209E7D5C5FC6330EC33DDEEA /* IrisActivityViews.swift */; };
+		3D6768969C6A64556B39A553 /* IrisWidgetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AF777B1E1CBCF2E2DCA2B14 /* IrisWidgetViews.swift */; };
 		4216F818E63662E553C51500 /* PreviewFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44158FCF676922C803B51D76 /* PreviewFixture.swift */; };
+		4AD9007A1E84D68A9C9A4EE7 /* IrisSamples.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BE8F684A436F6E8A3D68960 /* IrisSamples.swift */; };
 		4FD1AA9C592978A3B92933C5 /* PushNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1FD22C18E3043EBFE45D66A /* PushNotificationTests.swift */; };
+		4FD4522E3726BAD5F9E6659E /* WidgetSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25B63FDB0BBECD98DFAFA3B4 /* WidgetSnapshotTests.swift */; };
 		53B26F23DB9C9EDE6BFF2AA3 /* PushService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA10968ADB5F54903F8DDE33 /* PushService.swift */; };
 		557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4189F82A2B6C03639E03D5A1 /* LiveClient.swift */; };
 		5902882E93962A4CF6C1E5D7 /* RunsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8C241185697D6C0DEF8682F /* RunsView.swift */; };
 		5CEC651FA6611B33169313D2 /* BackgroundSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66AEFEC3D5F04AD54FEAA2D5 /* BackgroundSession.swift */; };
+		6492220C54D482F4343FF4F4 /* IrisWidgetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AF777B1E1CBCF2E2DCA2B14 /* IrisWidgetViews.swift */; };
+		69A1340294FC0261455E9AC7 /* ActivityRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1451F46CEDCAE9D40B39428B /* ActivityRenderTests.swift */; };
 		6C15004CC1558986BE65A9A7 /* VoiceChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8992B150EB60B4998A91EB04 /* VoiceChoice.swift */; };
 		6EE85A68B9ED731A68D5F315 /* RunProgressUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 802E90D009929236B2CAB781 /* RunProgressUITests.swift */; };
 		71C6C13FEC4CFC0FA5EF307B /* VoiceOrb.swift in Sources */ = {isa = PBXBuildFile; fileRef = F38311FEC3DE629354AA91DB /* VoiceOrb.swift */; };
@@ -34,20 +51,32 @@
 		7F225A96DC1A109963081216 /* LinkRequestBodyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF7DBDE24A1F7A5EB6A18720 /* LinkRequestBodyTests.swift */; };
 		7F58546D72FD6642A0D25DB2 /* SessionReconnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53E789AE18C6DD561651B14F /* SessionReconnectTests.swift */; };
 		8049F0B862DB3E0EB3CB0C2C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8261FF5C0D663124876807 /* ContentView.swift */; };
+		806DBCEDAEC436B029E73D3B /* IrisActivityPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC39509FCA98A446F5317265 /* IrisActivityPresentation.swift */; };
 		80DB369FD55B326794F2BDB1 /* RunStepDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 740952956D3FED095C93B5E9 /* RunStepDecodingTests.swift */; };
+		847D54EE15B6F042857B0B5A /* IrisRunLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9ADE559F09D0CBCB31EA268 /* IrisRunLink.swift */; };
 		89097D0BD8B508DB23ABFA19 /* GlassSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B154F3B638C2095E7B4B395 /* GlassSupport.swift */; };
 		8F8382E489CD1209F83231B1 /* RunTitleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B329885D8CE5622DA218847 /* RunTitleTests.swift */; };
 		92E67DB383BEDA7A4668CDA1 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EA1E5667195167B25328464 /* TranscriptView.swift */; };
 		9554B016B052B1EE05F3A2E0 /* PendingApprovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5025D095AA4BCCB49DB700 /* PendingApprovalTests.swift */; };
 		97A919850B997D5F15E0DF24 /* VoiceChoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB6E119801D8B561D4B1259 /* VoiceChoiceTests.swift */; };
+		9AA792B9C4E94D8D353B0C7B /* LiveActivityPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BFF88E3FE1B7DC9B1CF4FB5 /* LiveActivityPayloadTests.swift */; };
 		9BA554B47B6430B3F83C6C4A /* VoicePreviewPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07C6D62D1E66E53441ECEBD8 /* VoicePreviewPlayer.swift */; };
 		9DE247868CF170B5C4868A2F /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E66E3826AB55C6789CD430 /* MainView.swift */; };
 		A56C704952B56DBB44894289 /* ErrorBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFFB50A44E15BA0C87171B4D /* ErrorBanner.swift */; };
+		AAE2A3BDFE7F0A82067A71BE /* ActivityKitSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED5CFE5C568A2D507FBC0487 /* ActivityKitSource.swift */; };
 		ADB6944AD6E1CABEE50E7752 /* RunsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DACE1F0397FDE51E3F45FF90 /* RunsScreen.swift */; };
+		B08CB37177A16A63B95A7CA2 /* LiveActivityPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B717CEDDAA3BF671E2AD2EC3 /* LiveActivityPlanTests.swift */; };
+		B0BE9288A47CDF7FD11276EA /* IrisRunActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4FE292B5C74BD8E5F7CDDAD /* IrisRunActivityAttributes.swift */; };
+		B2EB74F6850C625FA831F181 /* LiveActivityPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDE425697568C8BA81FE8944 /* LiveActivityPlan.swift */; };
+		B4AD4DC34551CF1ECFDD5CEB /* WidgetBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FE9EE5356BD53E048F21FD8 /* WidgetBridge.swift */; };
+		B4D93A72BDCA5F6D2CF6E233 /* IrisRunLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88FDA668540E753A20CE13E7 /* IrisRunLinkTests.swift */; };
 		B4E45E25D9B3FAEDB6829463 /* VoicePreviewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 370497F0B03F95BD9C783F84 /* VoicePreviewController.swift */; };
 		B962210C1EF9699A06E301E9 /* UserControlConfirmationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D3EA883324CF34C77ED27E /* UserControlConfirmationTests.swift */; };
+		C054A4432774828CBB146E2D /* IrisWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E828F29D98B286D7073AE96D /* IrisWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C2926296D3E51FF667BA2D77 /* RunProgressStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA3C70206A89ECE5C52636 /* RunProgressStoreTests.swift */; };
 		C98B815AE9219B9FFB72373B /* NavigationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8034272BB038666CFD910B1 /* NavigationUITests.swift */; };
+		CA578E68AF833CD5A331909D /* IrisActivityPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC39509FCA98A446F5317265 /* IrisActivityPresentation.swift */; };
+		CF132B420B670D7A241E94E7 /* IrisRunActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4FE292B5C74BD8E5F7CDDAD /* IrisRunActivityAttributes.swift */; };
 		D2761F13790975C08B358508 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5A3592095F69FC15A205046 /* KeychainStore.swift */; };
 		D976C4513B23EC422E27B8EA /* AnswerButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C20141D912CDD83949B0CF /* AnswerButtons.swift */; };
 		D985CC56BA83BB1A3BBAB852 /* DispatchGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9EBD17A6B834DB2DCC6813D /* DispatchGate.swift */; };
@@ -55,17 +84,27 @@
 		DDC72DFC46AF074500FDD884 /* ApprovalAnsweringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77A07619E6E4C3862B5B114E /* ApprovalAnsweringTests.swift */; };
 		E674095376CE083F2734612B /* DispatchGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7D15764E1D509276093802 /* DispatchGateTests.swift */; };
 		EA2AD696562BE7244884B02C /* VoiceAndApprovalUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3612DEAE1D0459258E3402CE /* VoiceAndApprovalUITests.swift */; };
+		EA530D547699C8923580B34B /* IrisWidgetSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBD2A6DE860C68679748FD7 /* IrisWidgetSnapshot.swift */; };
 		ED8F78B204CC80AEBCAAD64B /* LinkTaskServiceDispatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83071A7D3D6AAB2E9011024E /* LinkTaskServiceDispatchTests.swift */; };
 		EEFBB86A57B38AC00AFEAC36 /* FakeLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */; };
+		F15380367867CC6CFC28352C /* IrisLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B3AFCB650D2C9B572F8ED6A /* IrisLiveActivityWidget.swift */; };
 		F1CC123246E9E23C45CD569A /* ToolRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9FED6DA41D3A314036A5068 /* ToolRouter.swift */; };
 		F2CCDEB787C4E7CAEB08FB3F /* AnswerButtonUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F4AFBF57EDCAAE5333390A /* AnswerButtonUITests.swift */; };
 		FA21E7E4EEBD75ABC1310804 /* ApprovalAnswering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 676E69F3EDD5AB3DE4196287 /* ApprovalAnswering.swift */; };
 		FA9DB0C54BA7DABD964CED5C /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69EFBFA82632C29FEC935739 /* MarkdownText.swift */; };
 		FB6561E1044323652396CE55 /* AuroraBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = D99C112C68C6DD69C76FF4DC /* AuroraBackground.swift */; };
+		FCF3F771B39F6125834439F3 /* IrisSamples.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BE8F684A436F6E8A3D68960 /* IrisSamples.swift */; };
 		FCFA9AD0EF4E33E25D853544 /* PairingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEA2C82FF7A7521FAED0FD9A /* PairingSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		7F5B501D44F58791824A02BE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 89462752CB9066DBED9C6254 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 09048342072E79A066435B38;
+			remoteInfo = IrisWidgets;
+		};
 		8F26318EE10683234FD01BD9 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 89462752CB9066DBED9C6254 /* Project object */;
@@ -82,13 +121,34 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		2E3F04A387513A707982E9EE /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C054A4432774828CBB146E2D /* IrisWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		025FEF6CACEBD7DF8AAC87CE /* RunNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunNotifier.swift; sourceTree = "<group>"; };
 		032B7C60102E5FE420222C68 /* ReconnectPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconnectPolicyTests.swift; sourceTree = "<group>"; };
 		07C6D62D1E66E53441ECEBD8 /* VoicePreviewPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePreviewPlayer.swift; sourceTree = "<group>"; };
+		0AF777B1E1CBCF2E2DCA2B14 /* IrisWidgetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisWidgetViews.swift; sourceTree = "<group>"; };
+		0FE9EE5356BD53E048F21FD8 /* WidgetBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetBridge.swift; sourceTree = "<group>"; };
+		11212B064F9D9B41EDAC319C /* LinkSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkSummary.swift; sourceTree = "<group>"; };
 		13EA3C70206A89ECE5C52636 /* RunProgressStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunProgressStoreTests.swift; sourceTree = "<group>"; };
+		1451F46CEDCAE9D40B39428B /* ActivityRenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityRenderTests.swift; sourceTree = "<group>"; };
 		1B5025D095AA4BCCB49DB700 /* PendingApprovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingApprovalTests.swift; sourceTree = "<group>"; };
 		1BB6E119801D8B561D4B1259 /* VoiceChoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChoiceTests.swift; sourceTree = "<group>"; };
+		1BE8F684A436F6E8A3D68960 /* IrisSamples.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisSamples.swift; sourceTree = "<group>"; };
+		209E7D5C5FC6330EC33DDEEA /* IrisActivityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisActivityViews.swift; sourceTree = "<group>"; };
+		25B63FDB0BBECD98DFAFA3B4 /* WidgetSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetSnapshotTests.swift; sourceTree = "<group>"; };
 		2D227501453EA6C526AE2F98 /* RunProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunProgress.swift; sourceTree = "<group>"; };
 		2EA1E5667195167B25328464 /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		3612DEAE1D0459258E3402CE /* VoiceAndApprovalUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceAndApprovalUITests.swift; sourceTree = "<group>"; };
@@ -100,30 +160,41 @@
 		42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeLinkService.swift; sourceTree = "<group>"; };
 		44158FCF676922C803B51D76 /* PreviewFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewFixture.swift; sourceTree = "<group>"; };
 		48D18DE262A5BA94B75B1E28 /* RunPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunPresentation.swift; sourceTree = "<group>"; };
+		4B55BFED162EE5FDA167C127 /* PresentationSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentationSnapshotTests.swift; sourceTree = "<group>"; };
 		53E789AE18C6DD561651B14F /* SessionReconnectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionReconnectTests.swift; sourceTree = "<group>"; };
 		570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisLivePrototypeApp.swift; sourceTree = "<group>"; };
+		5B3AFCB650D2C9B572F8ED6A /* IrisLiveActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisLiveActivityWidget.swift; sourceTree = "<group>"; };
 		5E8775E3B82E471D52AED945 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
 		5EA9E2F7177CCE0655924686 /* MarkdownBlockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockTests.swift; sourceTree = "<group>"; };
+		6155B1B22EE93F99799A4D54 /* LinkLiveActivityRouteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkLiveActivityRouteTests.swift; sourceTree = "<group>"; };
 		66AEFEC3D5F04AD54FEAA2D5 /* BackgroundSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundSession.swift; sourceTree = "<group>"; };
 		676E69F3EDD5AB3DE4196287 /* ApprovalAnswering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalAnswering.swift; sourceTree = "<group>"; };
 		69EFBFA82632C29FEC935739 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
+		6BFF88E3FE1B7DC9B1CF4FB5 /* LiveActivityPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityPayloadTests.swift; sourceTree = "<group>"; };
+		70E4BBB261A7BBCDB06EADA5 /* IrisSummaryWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisSummaryWidget.swift; sourceTree = "<group>"; };
 		740952956D3FED095C93B5E9 /* RunStepDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunStepDecodingTests.swift; sourceTree = "<group>"; };
 		77A07619E6E4C3862B5B114E /* ApprovalAnsweringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalAnsweringTests.swift; sourceTree = "<group>"; };
 		802E90D009929236B2CAB781 /* RunProgressUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunProgressUITests.swift; sourceTree = "<group>"; };
 		83071A7D3D6AAB2E9011024E /* LinkTaskServiceDispatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTaskServiceDispatchTests.swift; sourceTree = "<group>"; };
 		8651963969E1450F1C34BEF1 /* RunDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunDetailView.swift; sourceTree = "<group>"; };
+		88FDA668540E753A20CE13E7 /* IrisRunLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisRunLinkTests.swift; sourceTree = "<group>"; };
 		8992B150EB60B4998A91EB04 /* VoiceChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChoice.swift; sourceTree = "<group>"; };
 		8B154F3B638C2095E7B4B395 /* GlassSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassSupport.swift; sourceTree = "<group>"; };
 		92F61B4A1FB9F053E6D68A8B /* PushToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushToken.swift; sourceTree = "<group>"; };
 		97D3EA883324CF34C77ED27E /* UserControlConfirmationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserControlConfirmationTests.swift; sourceTree = "<group>"; };
 		9E9D8390F9F9C32CDD0A0709 /* LinkTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTasks.swift; sourceTree = "<group>"; };
+		9F87834D49BB7F51A666C3B3 /* IrisWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisWidgetsBundle.swift; sourceTree = "<group>"; };
 		A2BE592157D9D352AB0E03FA /* LinkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkClient.swift; sourceTree = "<group>"; };
 		A321262959C14EB0E6390036 /* IrisLivePrototype.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = IrisLivePrototype.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A5043FC8561B02B5E6BEA113 /* LiveActivitySettingsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivitySettingsUITests.swift; sourceTree = "<group>"; };
 		A5A3592095F69FC15A205046 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		AAC018E366B66DFA8E826526 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		ADBFD96EDF21736525752D0E /* ReconnectPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconnectPolicy.swift; sourceTree = "<group>"; };
 		B4347364D5A2BF6C730826B2 /* IrisLivePrototypeUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IrisLivePrototypeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B717CEDDAA3BF671E2AD2EC3 /* LiveActivityPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityPlanTests.swift; sourceTree = "<group>"; };
 		B8034272BB038666CFD910B1 /* NavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationUITests.swift; sourceTree = "<group>"; };
+		BC39509FCA98A446F5317265 /* IrisActivityPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisActivityPresentation.swift; sourceTree = "<group>"; };
+		BEBD2A6DE860C68679748FD7 /* IrisWidgetSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisWidgetSnapshot.swift; sourceTree = "<group>"; };
 		C1FD22C18E3043EBFE45D66A /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
 		C9FED6DA41D3A314036A5068 /* ToolRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolRouter.swift; sourceTree = "<group>"; };
 		CD96A45D465FF49D4CE142CE /* RunProgressFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunProgressFixtures.swift; sourceTree = "<group>"; };
@@ -138,19 +209,28 @@
 		DD8261FF5C0D663124876807 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DFFB50A44E15BA0C87171B4D /* ErrorBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorBanner.swift; sourceTree = "<group>"; };
 		E5E66E3826AB55C6789CD430 /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
+		E828F29D98B286D7073AE96D /* IrisWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = IrisWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E9ADE559F09D0CBCB31EA268 /* IrisRunLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisRunLink.swift; sourceTree = "<group>"; };
+		ED5CFE5C568A2D507FBC0487 /* ActivityKitSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityKitSource.swift; sourceTree = "<group>"; };
 		EEA2C82FF7A7521FAED0FD9A /* PairingSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingSheet.swift; sourceTree = "<group>"; };
+		EF160FE6DDB35C4E237EC4F8 /* LiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityController.swift; sourceTree = "<group>"; };
 		EF7DBDE24A1F7A5EB6A18720 /* LinkRequestBodyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkRequestBodyTests.swift; sourceTree = "<group>"; };
 		F38311FEC3DE629354AA91DB /* VoiceOrb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceOrb.swift; sourceTree = "<group>"; };
+		F4FE292B5C74BD8E5F7CDDAD /* IrisRunActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisRunActivityAttributes.swift; sourceTree = "<group>"; };
+		F51D6FF339954AB35BDC3796 /* LiveActivityControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityControllerTests.swift; sourceTree = "<group>"; };
 		F8C241185697D6C0DEF8682F /* RunsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunsView.swift; sourceTree = "<group>"; };
+		FDE425697568C8BA81FE8944 /* LiveActivityPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityPlan.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
 		10EBB83BE7862FF4F28074F0 = {
 			isa = PBXGroup;
 			children = (
+				75F9D81B33FBF98C4F0403EE /* Shared */,
 				C9EAEB45189D2928BDEEBFC0 /* Sources */,
 				BDEFA18BB3E50ACDAF69B242 /* Tests */,
 				E2890BD25DF1339939E682C5 /* UITests */,
+				2AFEFAABA49A269AECCBA2C2 /* Widgets */,
 				21BA29332446833EEFC17820 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -161,20 +241,52 @@
 				A321262959C14EB0E6390036 /* IrisLivePrototype.app */,
 				D4383840DB1117778529524E /* IrisLivePrototypeTests.xctest */,
 				B4347364D5A2BF6C730826B2 /* IrisLivePrototypeUITests.xctest */,
+				E828F29D98B286D7073AE96D /* IrisWidgets.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		2AFEFAABA49A269AECCBA2C2 /* Widgets */ = {
+			isa = PBXGroup;
+			children = (
+				5B3AFCB650D2C9B572F8ED6A /* IrisLiveActivityWidget.swift */,
+				70E4BBB261A7BBCDB06EADA5 /* IrisSummaryWidget.swift */,
+				9F87834D49BB7F51A666C3B3 /* IrisWidgetsBundle.swift */,
+			);
+			path = Widgets;
+			sourceTree = "<group>";
+		};
+		75F9D81B33FBF98C4F0403EE /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				BC39509FCA98A446F5317265 /* IrisActivityPresentation.swift */,
+				209E7D5C5FC6330EC33DDEEA /* IrisActivityViews.swift */,
+				F4FE292B5C74BD8E5F7CDDAD /* IrisRunActivityAttributes.swift */,
+				E9ADE559F09D0CBCB31EA268 /* IrisRunLink.swift */,
+				1BE8F684A436F6E8A3D68960 /* IrisSamples.swift */,
+				BEBD2A6DE860C68679748FD7 /* IrisWidgetSnapshot.swift */,
+				0AF777B1E1CBCF2E2DCA2B14 /* IrisWidgetViews.swift */,
+			);
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		BDEFA18BB3E50ACDAF69B242 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				1451F46CEDCAE9D40B39428B /* ActivityRenderTests.swift */,
 				77A07619E6E4C3862B5B114E /* ApprovalAnsweringTests.swift */,
 				DA7D15764E1D509276093802 /* DispatchGateTests.swift */,
 				42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */,
+				88FDA668540E753A20CE13E7 /* IrisRunLinkTests.swift */,
+				6155B1B22EE93F99799A4D54 /* LinkLiveActivityRouteTests.swift */,
 				EF7DBDE24A1F7A5EB6A18720 /* LinkRequestBodyTests.swift */,
 				83071A7D3D6AAB2E9011024E /* LinkTaskServiceDispatchTests.swift */,
+				F51D6FF339954AB35BDC3796 /* LiveActivityControllerTests.swift */,
+				6BFF88E3FE1B7DC9B1CF4FB5 /* LiveActivityPayloadTests.swift */,
+				B717CEDDAA3BF671E2AD2EC3 /* LiveActivityPlanTests.swift */,
 				5EA9E2F7177CCE0655924686 /* MarkdownBlockTests.swift */,
 				1B5025D095AA4BCCB49DB700 /* PendingApprovalTests.swift */,
+				4B55BFED162EE5FDA167C127 /* PresentationSnapshotTests.swift */,
 				C1FD22C18E3043EBFE45D66A /* PushNotificationTests.swift */,
 				032B7C60102E5FE420222C68 /* ReconnectPolicyTests.swift */,
 				13EA3C70206A89ECE5C52636 /* RunProgressStoreTests.swift */,
@@ -184,6 +296,7 @@
 				3852C1772D95F3A6EC9237BE /* ToolRouterTests.swift */,
 				97D3EA883324CF34C77ED27E /* UserControlConfirmationTests.swift */,
 				1BB6E119801D8B561D4B1259 /* VoiceChoiceTests.swift */,
+				25B63FDB0BBECD98DFAFA3B4 /* WidgetSnapshotTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -191,6 +304,7 @@
 		C9EAEB45189D2928BDEEBFC0 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				ED5CFE5C568A2D507FBC0487 /* ActivityKitSource.swift */,
 				D1C20141D912CDD83949B0CF /* AnswerButtons.swift */,
 				676E69F3EDD5AB3DE4196287 /* ApprovalAnswering.swift */,
 				5E8775E3B82E471D52AED945 /* AudioEngine.swift */,
@@ -203,7 +317,10 @@
 				570F960D75F232F6304BC086 /* IrisLivePrototypeApp.swift */,
 				A5A3592095F69FC15A205046 /* KeychainStore.swift */,
 				A2BE592157D9D352AB0E03FA /* LinkClient.swift */,
+				11212B064F9D9B41EDAC319C /* LinkSummary.swift */,
 				9E9D8390F9F9C32CDD0A0709 /* LinkTasks.swift */,
+				EF160FE6DDB35C4E237EC4F8 /* LiveActivityController.swift */,
+				FDE425697568C8BA81FE8944 /* LiveActivityPlan.swift */,
 				4189F82A2B6C03639E03D5A1 /* LiveClient.swift */,
 				E5E66E3826AB55C6789CD430 /* MainView.swift */,
 				69EFBFA82632C29FEC935739 /* MarkdownText.swift */,
@@ -227,6 +344,7 @@
 				F38311FEC3DE629354AA91DB /* VoiceOrb.swift */,
 				370497F0B03F95BD9C783F84 /* VoicePreviewController.swift */,
 				07C6D62D1E66E53441ECEBD8 /* VoicePreviewPlayer.swift */,
+				0FE9EE5356BD53E048F21FD8 /* WidgetBridge.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -235,6 +353,7 @@
 			isa = PBXGroup;
 			children = (
 				D3F4AFBF57EDCAAE5333390A /* AnswerButtonUITests.swift */,
+				A5043FC8561B02B5E6BEA113 /* LiveActivitySettingsUITests.swift */,
 				B8034272BB038666CFD910B1 /* NavigationUITests.swift */,
 				802E90D009929236B2CAB781 /* RunProgressUITests.swift */,
 				3612DEAE1D0459258E3402CE /* VoiceAndApprovalUITests.swift */,
@@ -245,15 +364,34 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		09048342072E79A066435B38 /* IrisWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 235A81C8AF6A56905CAEC245 /* Build configuration list for PBXNativeTarget "IrisWidgets" */;
+			buildPhases = (
+				F0EA4EF541F5C46F58540C45 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IrisWidgets;
+			packageProductDependencies = (
+			);
+			productName = IrisWidgets;
+			productReference = E828F29D98B286D7073AE96D /* IrisWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		189C268FD55B305BA2FC6E86 /* IrisLivePrototype */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 157A9A49F46CA8FD38E45032 /* Build configuration list for PBXNativeTarget "IrisLivePrototype" */;
 			buildPhases = (
 				2046938FE562AFA1ABA7F19D /* Sources */,
+				2E3F04A387513A707982E9EE /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				469D874FB333A66BCE36000C /* PBXTargetDependency */,
 			);
 			name = IrisLivePrototype;
 			packageProductDependencies = (
@@ -307,6 +445,10 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					09048342072E79A066435B38 = {
+						DevelopmentTeam = YA3FM9C24T;
+						ProvisioningStyle = Automatic;
+					};
 					189C268FD55B305BA2FC6E86 = {
 						DevelopmentTeam = YA3FM9C24T;
 						ProvisioningStyle = Automatic;
@@ -339,6 +481,7 @@
 				189C268FD55B305BA2FC6E86 /* IrisLivePrototype */,
 				5464833E2D661BB65C55F5B6 /* IrisLivePrototypeTests */,
 				E778C1442969177EB3128C2E /* IrisLivePrototypeUITests */,
+				09048342072E79A066435B38 /* IrisWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -348,6 +491,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AAE2A3BDFE7F0A82067A71BE /* ActivityKitSource.swift in Sources */,
 				D976C4513B23EC422E27B8EA /* AnswerButtons.swift in Sources */,
 				FA21E7E4EEBD75ABC1310804 /* ApprovalAnswering.swift in Sources */,
 				306F17CF209EA9FD83960288 /* AudioEngine.swift in Sources */,
@@ -357,10 +501,20 @@
 				D985CC56BA83BB1A3BBAB852 /* DispatchGate.swift in Sources */,
 				A56C704952B56DBB44894289 /* ErrorBanner.swift in Sources */,
 				89097D0BD8B508DB23ABFA19 /* GlassSupport.swift in Sources */,
+				806DBCEDAEC436B029E73D3B /* IrisActivityPresentation.swift in Sources */,
+				3D3F4F9F73859EFCBEDD2ABA /* IrisActivityViews.swift in Sources */,
 				0450E9051ABA8EBDFE8DADE4 /* IrisLivePrototypeApp.swift in Sources */,
+				B0BE9288A47CDF7FD11276EA /* IrisRunActivityAttributes.swift in Sources */,
+				12A2E50AAC73A478CFE7C68F /* IrisRunLink.swift in Sources */,
+				FCF3F771B39F6125834439F3 /* IrisSamples.swift in Sources */,
+				EA530D547699C8923580B34B /* IrisWidgetSnapshot.swift in Sources */,
+				6492220C54D482F4343FF4F4 /* IrisWidgetViews.swift in Sources */,
 				D2761F13790975C08B358508 /* KeychainStore.swift in Sources */,
 				76D237D2589D1C516C5D2B2F /* LinkClient.swift in Sources */,
+				09865000C12922AB23046B7D /* LinkSummary.swift in Sources */,
 				DC0910E04DEDB701A6C1CA26 /* LinkTasks.swift in Sources */,
+				3C0C83B453501DE20C88078C /* LiveActivityController.swift in Sources */,
+				B2EB74F6850C625FA831F181 /* LiveActivityPlan.swift in Sources */,
 				557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */,
 				9DE247868CF170B5C4868A2F /* MainView.swift in Sources */,
 				FA9DB0C54BA7DABD964CED5C /* MarkdownText.swift in Sources */,
@@ -384,6 +538,7 @@
 				71C6C13FEC4CFC0FA5EF307B /* VoiceOrb.swift in Sources */,
 				B4E45E25D9B3FAEDB6829463 /* VoicePreviewController.swift in Sources */,
 				9BA554B47B6430B3F83C6C4A /* VoicePreviewPlayer.swift in Sources */,
+				B4AD4DC34551CF1ECFDD5CEB /* WidgetBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -391,13 +546,20 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				69A1340294FC0261455E9AC7 /* ActivityRenderTests.swift in Sources */,
 				DDC72DFC46AF074500FDD884 /* ApprovalAnsweringTests.swift in Sources */,
 				E674095376CE083F2734612B /* DispatchGateTests.swift in Sources */,
 				EEFBB86A57B38AC00AFEAC36 /* FakeLinkService.swift in Sources */,
+				B4D93A72BDCA5F6D2CF6E233 /* IrisRunLinkTests.swift in Sources */,
+				0089792744ABF919DB2F660F /* LinkLiveActivityRouteTests.swift in Sources */,
 				7F225A96DC1A109963081216 /* LinkRequestBodyTests.swift in Sources */,
 				ED8F78B204CC80AEBCAAD64B /* LinkTaskServiceDispatchTests.swift in Sources */,
+				1AEF6DF92531E588770BDF56 /* LiveActivityControllerTests.swift in Sources */,
+				9AA792B9C4E94D8D353B0C7B /* LiveActivityPayloadTests.swift in Sources */,
+				B08CB37177A16A63B95A7CA2 /* LiveActivityPlanTests.swift in Sources */,
 				1284C4336804CE98EE37990F /* MarkdownBlockTests.swift in Sources */,
 				9554B016B052B1EE05F3A2E0 /* PendingApprovalTests.swift in Sources */,
+				1E1C2C4DFD3FA91A0BEFB637 /* PresentationSnapshotTests.swift in Sources */,
 				4FD1AA9C592978A3B92933C5 /* PushNotificationTests.swift in Sources */,
 				228C1E798940A67A180B4126 /* ReconnectPolicyTests.swift in Sources */,
 				C2926296D3E51FF667BA2D77 /* RunProgressStoreTests.swift in Sources */,
@@ -407,6 +569,7 @@
 				30C24039DA90DFE03E075F90 /* ToolRouterTests.swift in Sources */,
 				B962210C1EF9699A06E301E9 /* UserControlConfirmationTests.swift in Sources */,
 				97A919850B997D5F15E0DF24 /* VoiceChoiceTests.swift in Sources */,
+				4FD4522E3726BAD5F9E6659E /* WidgetSnapshotTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -415,15 +578,38 @@
 			buildActionMask = 2147483647;
 			files = (
 				F2CCDEB787C4E7CAEB08FB3F /* AnswerButtonUITests.swift in Sources */,
+				36829DD8B03A685FD0CBADC2 /* LiveActivitySettingsUITests.swift in Sources */,
 				C98B815AE9219B9FFB72373B /* NavigationUITests.swift in Sources */,
 				6EE85A68B9ED731A68D5F315 /* RunProgressUITests.swift in Sources */,
 				EA2AD696562BE7244884B02C /* VoiceAndApprovalUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F0EA4EF541F5C46F58540C45 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CA578E68AF833CD5A331909D /* IrisActivityPresentation.swift in Sources */,
+				083D13DECF7C695DFBE98F98 /* IrisActivityViews.swift in Sources */,
+				F15380367867CC6CFC28352C /* IrisLiveActivityWidget.swift in Sources */,
+				CF132B420B670D7A241E94E7 /* IrisRunActivityAttributes.swift in Sources */,
+				847D54EE15B6F042857B0B5A /* IrisRunLink.swift in Sources */,
+				4AD9007A1E84D68A9C9A4EE7 /* IrisSamples.swift in Sources */,
+				15C5476C539EB0C34FAD2B7B /* IrisSummaryWidget.swift in Sources */,
+				2522C92D54485313E91C47A6 /* IrisWidgetSnapshot.swift in Sources */,
+				3D6768969C6A64556B39A553 /* IrisWidgetViews.swift in Sources */,
+				149871568B3295D082BB3877 /* IrisWidgetsBundle.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		469D874FB333A66BCE36000C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 09048342072E79A066435B38 /* IrisWidgets */;
+			targetProxy = 7F5B501D44F58791824A02BE /* PBXContainerItemProxy */;
+		};
 		A2FB9BB236CC27B84B6F5186 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 189C268FD55B305BA2FC6E86 /* IrisLivePrototype */;
@@ -493,6 +679,27 @@
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
+		};
+		13895E781DDE2F9BDE1FF6D8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = IrisWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = YA3FM9C24T;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "IrisWidgets-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.iris.liveprototype.widgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
 		};
 		2DBED26D76206571D1B53342 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -678,6 +885,27 @@
 			};
 			name = Debug;
 		};
+		F39FDE34553C1F0C98445FC1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = IrisWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = YA3FM9C24T;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "IrisWidgets-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.iris.liveprototype.widgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -695,6 +923,15 @@
 			buildConfigurations = (
 				BBA3AC096A6625A01B922021 /* Debug */,
 				88C50C912B4DC41FF65DE2CD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		235A81C8AF6A56905CAEC245 /* Build configuration list for PBXNativeTarget "IrisWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				13895E781DDE2F9BDE1FF6D8 /* Debug */,
+				F39FDE34553C1F0C98445FC1 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
