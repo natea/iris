@@ -84,6 +84,28 @@ final class VoiceSettingsUITests: XCTestCase {
         XCTAssertEqual(macDefault.value as? String, "Selected")
     }
 
+    /// Tapping ▶ has to reach the preview, not the row's other button. The
+    /// fixture has no Mac behind it, so a preview that really started ends in
+    /// the inline failure line; a tap that went nowhere leaves nothing at all.
+    func testTappingPreviewStartsAPreviewAndLeavesTheChoiceAlone() {
+        let app = launchSettings()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 15))
+        let play = app.buttons["preview-Puck"]
+        XCTAssertTrue(reveal(play, in: app))
+        XCTAssertTrue(play.isEnabled, "no conversation is live, so the preview must be on offer")
+        let before = app.buttons["voice-Puck"].value as? String
+        play.tap()
+
+        let failure = app.staticTexts.containing(
+            NSPredicate(format: "label BEGINSWITH 'Puck: '")
+        ).firstMatch
+        // The line sits under the last voice, and a List builds no row it is
+        // not showing.
+        XCTAssertTrue(reveal(failure, in: app), "the tap never reached the preview")
+        XCTAssertEqual(app.buttons["voice-Puck"].value as? String, before,
+                       "hearing a voice must not choose it")
+    }
+
     /// §13.2 — the user must not think the voice they just picked applies to
     /// the conversation they are in.
     func testTheSectionSaysANewVoiceAppliesNextTime() {

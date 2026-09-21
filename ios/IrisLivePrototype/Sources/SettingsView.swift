@@ -200,6 +200,18 @@ struct SettingsView: View {
         let macDefault = pairing.status?.defaultVoice ?? ""
 
         Section {
+            // Above the rows, not under them: the greyed ▶ buttons are the
+            // first thing seen, and the reason has to be on screen with them.
+            if session.isRunning, !catalogue.isEmpty {
+                Label(
+                    "Iris is in a conversation, so previews are off. A conversation keeps the voice it started with.",
+                    systemImage: "waveform"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
             if catalogue.isEmpty {
                 Label(
                     pairing.status == nil
@@ -247,15 +259,7 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if session.isRunning {
-                Label(
-                    "Iris is in a conversation, so previews are off. A conversation keeps the voice it started with.",
-                    systemImage: "waveform"
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            } else if !preview.caption.isEmpty {
+            if !session.isRunning, !preview.caption.isEmpty {
                 Text(preview.caption)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -302,12 +306,20 @@ struct SettingsView: View {
                 Button {
                     preview.play(voice: previewName, paired: paired)
                 } label: {
-                    if isBusy {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Image(systemName: "play.circle")
-                            .font(.title3)
+                    Group {
+                        if isBusy {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "play.circle")
+                                .font(.title3)
+                        }
                     }
+                    // The glyph alone is 19 pt square: a thumb misses it, and
+                    // a miss to the left chooses the voice instead.
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    // Reach, not height: the row stays as tall as its text.
+                    .padding(.vertical, -11)
                 }
                 .buttonStyle(.plain)
                 .disabled(session.isRunning || (preview.isBusy && !isBusy))
