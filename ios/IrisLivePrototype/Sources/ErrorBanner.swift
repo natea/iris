@@ -56,6 +56,13 @@ enum ErrorPresentation {
         }
         // Everything else — including every `LinkError.message`, which is
         // already written for a person — passes through untouched.
+        //
+        // That is deliberate for LINK_API.md §15: a classified failure's
+        // message IS the desktop's own sentence ("That chat is open in Hermes
+        // Desktop…"), and rewriting it here would put the phone and the Mac
+        // back to disagreeing about what happened. Nothing below §15's codes
+        // is mapped, so the banner can never substitute the old generic
+        // "Hermes is not reachable" line for a Hermes that was running.
         return text
     }
 }

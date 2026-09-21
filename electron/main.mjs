@@ -60,8 +60,21 @@ import {
   autoSleepDecision,
   hasGoogleSearchEvidence,
 } from "./liveSessionState.mjs";
-import { HermesGatewayClient } from "./hermesGatewayClient.mjs";
+import {
+  DEFAULT_STARTUP_TIMEOUT_MS as HERMES_DEFAULT_START_TIMEOUT_MS,
+  HermesGatewayClient,
+} from "./hermesGatewayClient.mjs";
 import { HermesInteractiveTransport } from "./hermesInteractiveTransport.mjs";
+import { classifyHermesFailure, failureBlock } from "./hermesFailure.mjs";
+import {
+  LINK_TASK_LIMIT,
+  earlierRuns as buildEarlierRuns,
+  isRestoredRunId,
+  mergeSessionRuns,
+  orderTaskList,
+  restoredTaskSummary as buildRestoredTaskSummary,
+  sessionOfRestoredRunId,
+} from "./linkRunList.mjs";
 import { isSleepIntent } from "./sleepIntent.mjs";
 import { HERMES_FUNCTION_DECLARATIONS } from "./hermesTools.mjs";
 import { buildMobileLiveConfig, buildMobilePreviewConfig } from "./mobileSession.mjs";
@@ -537,6 +550,7 @@ const ALLOWED_CONFIG_KEYS = new Set([
   "IRIS_BRAIN_SEMANTIC",
   "IRIS_BRAIN_AUTO_INDEX",
   "IRIS_HERMES_AUTOSTART",
+  "IRIS_HERMES_START_TIMEOUT_MS",
   "IRIS_HERMES_TRANSPORT",
   "IRIS_HERMES_CWD",
   "IRIS_HERMES_PROTECTED_PATHS",
@@ -745,11 +759,22 @@ function hermesProtectedPaths() {
       ];
 }
 
+// `hermes serve` loads every configured MCP server before it reports ready, so
+// its honest startup cost is tens of seconds on a bad day, not the few seconds
+// that were once budgeted. Configurable, floored well above the observed range
+// so a typo cannot reintroduce the old spurious "not reachable".
+function hermesStartTimeoutMs() {
+  const value = Number.parseInt(process.env.IRIS_HERMES_START_TIMEOUT_MS || "", 10);
+  if (!Number.isInteger(value) || value <= 0) return HERMES_DEFAULT_START_TIMEOUT_MS;
+  return Math.min(Math.max(value, 15_000), 10 * 60_000);
+}
+
 function getInteractiveHermes() {
   if (interactiveHermes) return interactiveHermes;
   const client = new HermesGatewayClient({
     candidates: hermesCliCandidates,
     env: process.env,
+    startupTimeoutMs: hermesStartTimeoutMs(),
     log: (message) =>
       emitEvent({ type: "log", level: "info", message: `Hermes interactive: ${message}` }),
   });
@@ -2578,12 +2603,17 @@ function announceHermesCompletion({ runId, task, status, output }) {
   // not wake the Mac or speak a result the user is already hearing in their
   // hand. Desktop-origin runs are untouched.
   const ownedByDevice = String(entry?.origin || "desktop").startsWith("device:");
+  // A failed run gets the same classified reason the phone gets, so Iris says
+  // what actually happened instead of reading out a raw stack trace or
+  // claiming a result that does not exist.
+  const failure = linkFailureFor(entry);
   const eventText = formatHermesCompletionEvent({
     runId,
     status,
     output,
     userName: userDisplayName(),
     wakingFromSleep,
+    failure,
   });
 
   emitEvent({
@@ -2606,6 +2636,7 @@ function announceHermesCompletion({ runId, task, status, output }) {
       task: task || entry?.task || "",
       status,
       origin: entry?.origin || "",
+      failure,
     });
     return;
   }
@@ -4129,6 +4160,159 @@ async function mintGeminiToken({ voice: requestedVoice, purpose = "session", res
   };
 }
 
+// ===== Why a run failed (LINK_API.md, "Failure reasons and recovery") =====
+//
+// One classifier, applied everywhere a failure can reach a phone: the dispatch
+// route, the task list, the status route, the result route, the completion
+// push, and the desktop's own spoken announcement. The phone is never left to
+// infer a cause from a bare FAILED, and it is never told "not reachable" for a
+// Hermes that is running perfectly well and simply refused.
+
+const FAILED_RUN_STATUSES = new Set(["failed", "error"]);
+
+/** The interactive backend's own log tail, bounded — mined only for a cause. */
+function interactiveLogTail() {
+  try {
+    return String(interactiveHermes?.client?.logTail || "").slice(-4000);
+  } catch {
+    return "";
+  }
+}
+
+let lastLoggedFailure = { runId: "", code: "" };
+
+/**
+ * `failure` for a run, or null. Additive: a run that did not fail carries
+ * null, never an empty object. Logged once per run per distinct code, so a
+ * five-second poll cannot turn one failure into a log flood.
+ */
+function linkFailureFor(entry) {
+  if (!entry || !FAILED_RUN_STATUSES.has(String(entry.status || "").toLowerCase())) return null;
+  const block = failureBlock({
+    message: entry.error || entry.output || "",
+    logTail: interactiveLogTail(),
+  });
+  if (lastLoggedFailure.runId !== entry.runId || lastLoggedFailure.code !== block.code) {
+    lastLoggedFailure = { runId: entry.runId, code: block.code };
+    emitEvent({
+      type: "log",
+      level: "warn",
+      message: `Hermes run ${entry.runId} failed: ${block.code} (${block.recovery}).`,
+    });
+  }
+  return block;
+}
+
+// ===== Restored runs (parity with the desktop's Work Stream) =====
+//
+// The desktop shows the registry MERGED with runs rebuilt from the pinned
+// session's Hermes transcript. The phone used to show the registry alone, so
+// the moment the pinned session changed it showed one run where the Mac showed
+// thirteen. These helpers put the two lists back on the same footing.
+//
+// A restored run is read-only by construction: it is a reconstruction of a
+// finished conversation, not a live run the desktop can act on.
+const LINK_TRANSCRIPT_CACHE_MS = 5_000;
+let transcriptCache = { sessionId: "", at: 0, runs: [], inFlight: null };
+
+/**
+ * Transcript-rebuilt runs for one session, cached for a few seconds so the
+ * phone's 5 s list poll does not re-read a 2000-message transcript each time.
+ * A transcript failure degrades to an empty list — never to an error, and
+ * never blocking whatever asked.
+ */
+async function restoredRunsForSession(sessionId) {
+  const id = String(sessionId || "").trim();
+  if (!id) return [];
+  const at = Date.now();
+  if (transcriptCache.sessionId === id && at - transcriptCache.at < LINK_TRANSCRIPT_CACHE_MS) {
+    return transcriptCache.runs;
+  }
+  if (transcriptCache.inFlight && transcriptCache.sessionId === id) return transcriptCache.inFlight;
+  const work = sessionRunsFromTranscript(id)
+    .catch((error) => {
+      emitEvent({
+        type: "log",
+        level: "warn",
+        message: `Could not read the Hermes transcript for the run list: ${String(error?.message || error).slice(0, 200)}`,
+      });
+      return [];
+    })
+    .then((runs) => {
+      transcriptCache = { sessionId: id, at: Date.now(), runs, inFlight: null };
+      return runs;
+    });
+  transcriptCache = { sessionId: id, at: transcriptCache.at, runs: transcriptCache.runs, inFlight: work };
+  return work;
+}
+
+/** The list-sized shape for a transcript-restored run. No steps, no output. */
+function restoredTaskSummary(run) {
+  return buildRestoredTaskSummary(run, snapshotFromHistory(run.steps || []));
+}
+
+/** The desktop's merge rule (linkRunList.mjs), applied to the pinned session. */
+async function mergedSessionRuns(sessionId) {
+  return mergeSessionRuns(
+    runRegistry.list({ sessionId }),
+    await restoredRunsForSession(sessionId),
+  );
+}
+
+/** One restored run by its `history:<session>:<message>` id, or null. */
+async function findRestoredRun(runId) {
+  const sessionId = sessionOfRestoredRunId(runId);
+  if (!sessionId) return null;
+  const runs = await restoredRunsForSession(sessionId);
+  return runs.find((run) => run.id === runId) || null;
+}
+
+/**
+ * Registry runs from OTHER sessions — the chats that scrolled out of view when
+ * the pinned session changed. Served only when the phone asks with
+ * `?scope=all`, so an older build sees no change.
+ */
+function earlierLinkRuns(currentSessionId) {
+  return buildEarlierRuns(runRegistry.list(), currentSessionId, linkTaskSummary);
+}
+
+/**
+ * What `POST /link/sessions/new` is allowed to re-dispatch. Deliberately
+ * narrow: exactly one failed run, dispatched by THIS device, that failed for
+ * the one reason a new chat actually fixes. Anything else is refused in
+ * words, never silently downgraded into "just make a new chat".
+ */
+function newChatRetryGuard({ runId, deviceId }) {
+  if (isRestoredRunId(runId)) {
+    return {
+      error: "not_a_live_run",
+      message: "That one is history — it finished in an earlier chat, so there is nothing to retry.",
+    };
+  }
+  const entry = runRegistry.get(runId);
+  if (!entry) return { error: "task_unknown", message: "Iris doesn't know that run." };
+  if (!FAILED_RUN_STATUSES.has(String(entry.status || "").toLowerCase())) {
+    return {
+      error: "retry_not_allowed",
+      message: "That run didn't fail, so there is nothing to retry.",
+    };
+  }
+  if (String(entry.origin || "") !== `device:${deviceId}`) {
+    return {
+      error: "retry_not_allowed",
+      message: "That run came from somewhere else, so this phone cannot retry it.",
+    };
+  }
+  const failure = linkFailureFor(entry);
+  if (failure?.code !== "session_in_use") {
+    return {
+      error: "retry_not_allowed",
+      message: "That run failed for a different reason, so a new chat wouldn't help.",
+    };
+  }
+  return { entry };
+}
+
 // One shape for every task the phone sees, in the snake_case the rest of the
 // Link API uses.
 function linkTaskSummary(entry) {
@@ -4137,9 +4321,15 @@ function linkTaskSummary(entry) {
     task: entry.task,
     status: entry.status,
     origin: entry.origin || "desktop",
+    session_id: entry.sessionId || "",
+    restored: false,
+    read_only: false,
     created_at: entry.createdAt,
     updated_at: entry.updatedAt,
     announced_at: entry.announcedAt || 0,
+    // Why it failed, in one plain sentence, with a machine hint for what would
+    // fix it. Null for every run that did not fail.
+    failure: linkFailureFor(entry),
     // Real registry state only: an approval Hermes actually asked for, or an
     // interactive prompt Link cannot carry. Null when nothing is pending.
     pending_approval: pendingApprovalFor(entry),
@@ -4185,7 +4375,18 @@ async function startIrisLink() {
           origin: `device:${deviceId}`,
         });
         if (!result || result.status === "error") {
-          return { error: "dispatch_failed", message: result?.error || "Dispatch failed." };
+          // Not a blanket "dispatch failed" any more: Hermes usually said why,
+          // and the phone is entitled to the real reason.
+          const failure = failureBlock({
+            message: result?.error || "Dispatch failed.",
+            logTail: interactiveLogTail(),
+          });
+          emitEvent({
+            type: "log",
+            level: "warn",
+            message: `Iris Link dispatch refused: ${failure.code} (${failure.recovery}).`,
+          });
+          return { error: failure.code, message: failure.message, recovery: failure.recovery };
         }
         // A run this phone asked for is exactly when a Live Activity should
         // appear without the user doing anything. Push-to-start only if the
@@ -4235,27 +4436,60 @@ async function startIrisLink() {
             : null,
         };
       },
-      list: ({ deviceId, undelivered }) => {
+      list: async ({ deviceId, undelivered, scope }) => {
         const sessionId = hermesSessionId();
         const mine = `device:${deviceId}`;
-        return runRegistry
-          .list({ sessionId })
-          .filter((entry) => {
-            if (!undelivered) return true;
-            // Undelivered = finished, dispatched by THIS phone, and not yet
-            // acknowledged through POST /link/tasks/:id/announced.
-            return (
-              TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase()) &&
-              entry.origin === mine &&
-              !entry.announcedAt
-            );
-          })
-          .slice(0, 50)
-          .map((entry) => linkTaskSummary(entry));
+        // The undelivered handshake is about runs THIS phone dispatched and
+        // has not announced. A restored run was never dispatched by anyone
+        // here and has no announcement to owe, so this branch stays registry-
+        // only exactly as before.
+        if (undelivered) {
+          return {
+            tasks: runRegistry
+              .list({ sessionId })
+              .filter(
+                (entry) =>
+                  TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase()) &&
+                  entry.origin === mine &&
+                  !entry.announcedAt,
+              )
+              .slice(0, 50)
+              .map((entry) => linkTaskSummary(entry)),
+          };
+        }
+        // Parity with the desktop's Work Stream: the registry merged with the
+        // pinned session's transcript, same de-duplication, same ordering.
+        const { registry, restored } = await mergedSessionRuns(sessionId);
+        const tasks = orderTaskList(
+          [
+            ...registry.map((entry) => linkTaskSummary(entry)),
+            ...restored.map((run) => restoredTaskSummary(run)),
+          ],
+          LINK_TASK_LIMIT,
+        );
+        const payload = { tasks };
+        // Opt-in, so an older phone build sees exactly what it saw before.
+        if (scope === "all") payload.earlier = earlierLinkRuns(sessionId);
+        return payload;
       },
       get: async ({ runId, stepsSince }) => {
         const entry = runRegistry.get(runId);
-        if (!entry) return { error: "task_unknown" };
+        if (!entry) {
+          // A `history:<session>:<message>` id is not in the registry and
+          // never will be. Answer it from the transcript rather than with a
+          // 404 for a run the list just offered.
+          const restored = await findRestoredRun(runId);
+          if (!restored) return { error: "task_unknown" };
+          const progress = snapshotFromHistory(restored.steps || []);
+          return {
+            ...restoredTaskSummary(restored),
+            ...progress,
+            run_id: runId,
+            output: String(restored.output || ""),
+            instructions:
+              "This run was restored from the Hermes transcript. It is finished and read-only.",
+          };
+        }
         const status = await getHermesTaskStatus({ run_id: runId });
         // The step list rides along with the honest status. After an Iris
         // restart mid-run the in-memory steps are gone: the snapshot says so
@@ -4285,7 +4519,21 @@ async function startIrisLink() {
       },
       result: async ({ runId }) => {
         const entry = runRegistry.get(runId);
-        if (!entry) return { ok: false, error: "task_unknown" };
+        if (!entry) {
+          const restored = await findRestoredRun(runId);
+          if (!restored) return { ok: false, error: "task_unknown" };
+          if (!restored.output) return { ok: false, error: "result_unavailable" };
+          return {
+            ok: true,
+            run_id: runId,
+            task: restored.task,
+            status: restored.status || "completed",
+            output: String(restored.output),
+            instructions: "Answer only from this restored Hermes result.",
+            restored: true,
+            failure: null,
+          };
+        }
         if (!TERMINAL_RUN_STATUSES.has(String(entry.status).toLowerCase())) {
           return { ok: false, error: "task_not_finished" };
         }
@@ -4298,9 +4546,19 @@ async function startIrisLink() {
           status: stored.status || entry.status,
           output: stored.output,
           instructions: stored.instructions,
+          // A failed run's result screen leads with WHY, not with an empty
+          // "Result" section.
+          failure: linkFailureFor(entry),
         };
       },
       stop: async ({ runId }) => {
+        if (isRestoredRunId(runId)) {
+          return {
+            ok: false,
+            error: "not_a_live_run",
+            message: "That one is history — it finished in an earlier chat and cannot be stopped.",
+          };
+        }
         if (!runRegistry.get(runId)) return { ok: false, error: "task_unknown" };
         const result = await stopHermesTask({ run_id: runId });
         return { status: String(result?.status || "stopping") };
@@ -4309,6 +4567,13 @@ async function startIrisLink() {
       // buttons, has already collected an explicit human decision; it is
       // required to run the same describe-then-wait gate first.
       approve: async ({ runId, decision }) => {
+        if (isRestoredRunId(runId)) {
+          return {
+            ok: false,
+            error: "not_a_live_run",
+            message: "That one is history — there is nothing left to approve.",
+          };
+        }
         if (!runRegistry.get(runId)) return { ok: false, error: "task_unknown" };
         const result = await approveHermesAction(
           { run_id: runId, choice: decision },
@@ -4320,9 +4585,85 @@ async function startIrisLink() {
         return { ok: true };
       },
       markAnnounced: ({ runId }) => {
+        if (isRestoredRunId(runId)) {
+          return {
+            ok: false,
+            error: "not_a_live_run",
+            message: "That one is history — it was never waiting to be announced.",
+          };
+        }
         if (!runRegistry.get(runId)) return { ok: false, error: "task_unknown" };
         runRegistry.markAnnounced(runId);
         return { ok: true };
+      },
+
+      // ===== One-tap recovery from `session_in_use` =====
+      //
+      // Hermes allows one client per chat. When the Hermes Desktop app holds
+      // Iris's pinned chat, every dispatch fails until somebody starts a new
+      // one — so this route starts one, through the SAME function the
+      // desktop's own session switcher uses.
+      //
+      // DELIBERATE: this changes the pinned session for the DESKTOP as well.
+      // That is what "start a new chat" means — there is one pinned chat, not
+      // one per surface — so the renderer is told and its Work Stream follows.
+      //
+      // There is no tool for this. The model cannot reach it; only a tap on
+      // the phone's failure card can.
+      startNewChat: async ({ deviceId, retryRunId }) => {
+        let retry = null;
+        if (retryRunId) {
+          const guard = newChatRetryGuard({ runId: retryRunId, deviceId });
+          if (guard.error) return guard;
+          retry = guard.entry;
+        }
+        const created = await createHermesSession();
+        if (!created?.ok || !created.id) {
+          const failure = failureBlock({
+            message: created?.error || "Hermes did not create a new chat.",
+            logTail: interactiveLogTail(),
+          });
+          return { error: failure.code, message: failure.message, recovery: failure.recovery };
+        }
+        const sessionId = String(created.id);
+        writeUserConfig({ IRIS_HERMES_SESSION: sessionId });
+        // Drop the cached transcript: it belongs to the chat we just left.
+        transcriptCache = { sessionId: "", at: 0, runs: [], inFlight: null };
+        // The same renderer event the desktop reacts to when the pinned chat
+        // changes, so its session chip and Work Stream follow without a
+        // restart.
+        emitEvent({
+          type: "hermes_session_changed",
+          session_id: sessionId,
+          reason: "link_new_chat",
+        });
+        emitEvent({
+          type: "log",
+          level: "info",
+          message: `A paired phone started a new Hermes chat (${sessionId}); it is now the pinned session.`,
+        });
+
+        const payload = { session_id: sessionId, title: "" };
+        if (retry) {
+          const dispatched = await submitHermesTask({
+            // The EXACT brief that failed. Nothing is re-derived or reworded.
+            task: retry.task,
+            urgency: retry.urgency || "normal",
+            origin: `device:${deviceId}`,
+          });
+          if (dispatched?.run_id) {
+            payload.run_id = String(dispatched.run_id);
+            noteLiveActivityChange();
+          } else {
+            const failure = failureBlock({
+              message: dispatched?.error || "Hermes did not start the retried task.",
+              logTail: interactiveLogTail(),
+            });
+            payload.retry_error = failure.code;
+            payload.retry_message = failure.message;
+          }
+        }
+        return payload;
       },
     },
     // /link/status used to relay a cached flag that could be minutes stale and

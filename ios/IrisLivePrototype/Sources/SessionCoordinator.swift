@@ -46,8 +46,10 @@ public enum ProposalAnswerOutcome: Sendable, Equatable {
     case explaining
     /// The brief that button belonged to is not the staged one any more.
     case stale
-    /// Nothing was sent; the proposal is still staged. Plain-language reason.
-    case failed(message: String)
+    /// Nothing was sent; the proposal is still staged. Plain-language reason,
+    /// plus the classified failure when a tap on the card could fix it
+    /// (LINK_API.md §15.3) — today that is a Hermes chat held open elsewhere.
+    case failed(message: String, recovery: LinkFailure?)
 }
 
 public enum CoordinatorEvent: Sendable {
@@ -456,9 +458,9 @@ public actor SessionCoordinator {
             case .stale:
                 notify(.log("Yes button → that brief is no longer staged; nothing sent"))
                 return .stale
-            case .failed(let message):
+            case .failed(let message, let recovery):
                 notify(.log("Yes button → dispatch failed; the brief is still staged"))
-                return .failed(message: message)
+                return .failed(message: message, recovery: recovery)
             }
 
         case .no:
@@ -578,8 +580,10 @@ public actor SessionCoordinator {
     public func loadUndelivered() async {
         do {
             let pending = try await link.listTasks(undelivered: true)
-            // Oldest first.
-            for entry in pending.sorted(by: { $0.updatedAt < $1.updatedAt }) {
+            // Oldest first. A restored or read-only run is history (§16.3) and
+            // owes nobody an announcement — it finished in a chat that is no
+            // longer pinned, and Iris must not read it out as news.
+            for entry in pending.filter({ !$0.isHistory }).sorted(by: { $0.updatedAt < $1.updatedAt }) {
                 await enqueueAnnouncement(for: entry.runId, status: entry.status)
             }
             await drainAnnouncements()
@@ -650,15 +654,37 @@ public actor SessionCoordinator {
         // never be asked to summarize something the phone has not read.
         var output = ""
         var finalStatus = status
+        // Why it failed, if it did. Fetched with the result so the turn Iris
+        // is given carries the real reason rather than a bare FAILED.
+        var failure: LinkFailure?
         do {
             let result = try await link.taskResult(runId: runId)
             output = result.output
+            failure = result.failure
             if !result.status.isEmpty { finalStatus = result.status }
         } catch LinkError.taskNotFinished {
             return
+        } catch let error as LinkError {
+            // A failed run often has no stored result at all. The error itself
+            // may carry the classified reason; keep it rather than inventing
+            // "the result could not be read".
+            failure = error.failure
+            if failure == nil { output = "(The stored result could not be read from the Mac.)" }
         } catch {
             // The status line carries the failure; do not dress it up.
             output = "(The stored result could not be read from the Mac.)"
+        }
+        // A failed run with no classified reason still must not be announced
+        // as though it produced something.
+        if failure == nil, LinkRunStatus.isTerminal(finalStatus),
+           finalStatus.lowercased() == "failed" || finalStatus.lowercased() == "error" {
+            failure = LinkFailure(
+                code: .unknown,
+                message: output.isEmpty
+                    ? "Hermes couldn't run that, and it didn't say why."
+                    : output,
+                recovery: .retry
+            )
         }
         announcementQueue.append((
             runId: runId,
@@ -666,7 +692,8 @@ public actor SessionCoordinator {
                 runId: runId,
                 status: finalStatus,
                 output: output,
-                userName: userName
+                userName: userName,
+                failure: failure
             ),
             status: finalStatus
         ))

@@ -795,9 +795,13 @@ test("dispatch validation is explicit and nothing reaches the agent", async (t) 
   });
   assert.equal(desktop.dispatched.length, 0);
 
+  // A thrown dispatch is classified rather than blanketed: a refused
+  // connection really is an unreachable gateway, and says so by name.
   const unreachable = await post(JSON.stringify({ task: "unreachable" }));
   assert.equal(unreachable.status, 502);
-  assert.equal(unreachable.body.error, "agent_unreachable");
+  assert.equal(unreachable.body.error, "gateway_unreachable");
+  assert.equal(unreachable.body.recovery, "check_mac");
+  assert.match(unreachable.body.message, /isn't answering on your Mac/);
   const refused = await post(JSON.stringify({ task: "refused" }));
   assert.equal(refused.status, 502);
   assert.equal(refused.body.error, "dispatch_failed");
@@ -1593,4 +1597,303 @@ test("the phone's time zone reaches the minter, and a malformed one is dropped r
     assert.equal(response.status, 200);
   }
   assert.deepEqual(seen, ["America/New_York", undefined, undefined, undefined]);
+});
+
+// ===== Failure reasons, recovery, and read-only history =====
+
+const SESSION_IN_USE_TEXT =
+  "This chat is open in another Hermes window/terminal. Use it there, or start a new chat here.\n" +
+  "Details: session 20260916_174926_797a3b opened by desktop 1h36m ago.";
+
+const SESSION_IN_USE_FAILURE = Object.freeze({
+  code: "session_in_use",
+  message: "That chat is open in Hermes Desktop. Close it there, or I can start a new chat.",
+  recovery: "start_new_chat",
+  detail: SESSION_IN_USE_TEXT.split("\n")[0],
+});
+
+// A desktop whose dispatch refuses the way the real one did on 2026-09-16, and
+// whose run list carries a classified `failure` on the run that failed.
+function fakeFailingDesktop({ retryAllowed = true } = {}) {
+  const calls = { newChat: [], dispatched: [] };
+  const failedRun = {
+    run_id: "run-failed",
+    task: "Summarise yesterday's commits",
+    status: "failed",
+    origin: "device:DEVICE",
+    created_at: 10,
+    updated_at: 20,
+    announced_at: 0,
+    restored: false,
+    read_only: false,
+    failure: { ...SESSION_IN_USE_FAILURE },
+  };
+  const okRun = {
+    run_id: "run-ok",
+    task: "Something that worked",
+    status: "completed",
+    origin: "desktop",
+    created_at: 5,
+    updated_at: 6,
+    announced_at: 0,
+    restored: false,
+    read_only: false,
+    failure: null,
+  };
+  return {
+    calls,
+    failedRun,
+    tasks: {
+      dispatch: async () => ({
+        error: "session_in_use",
+        message: SESSION_IN_USE_FAILURE.message,
+        recovery: "start_new_chat",
+      }),
+      list: async ({ scope }) => ({
+        tasks: [failedRun, okRun],
+        ...(scope === "all"
+          ? {
+              earlier: [
+                {
+                  run_id: "old-1",
+                  task: "From the previous chat",
+                  status: "completed",
+                  origin: "desktop",
+                  session_id: "20260916_174926_797a3b",
+                  restored: false,
+                  read_only: true,
+                  updated_at: 1,
+                  failure: null,
+                },
+              ],
+            }
+          : {}),
+      }),
+      get: async ({ runId }) =>
+        runId === failedRun.run_id ? { ...failedRun } : { error: "task_unknown" },
+      result: async ({ runId }) =>
+        runId === failedRun.run_id
+          ? {
+              ok: true,
+              run_id: runId,
+              task: failedRun.task,
+              status: "failed",
+              output: "",
+              failure: { ...SESSION_IN_USE_FAILURE },
+            }
+          : { ok: false, error: "task_unknown" },
+      stop: async ({ runId }) =>
+        runId.startsWith("history:")
+          ? { ok: false, error: "not_a_live_run", message: "That one is history." }
+          : { status: "stopping" },
+      approve: async ({ runId }) =>
+        runId.startsWith("history:")
+          ? { ok: false, error: "not_a_live_run", message: "That one is history." }
+          : { ok: true },
+      markAnnounced: ({ runId }) =>
+        runId.startsWith("history:")
+          ? { ok: false, error: "not_a_live_run", message: "That one is history." }
+          : { ok: true },
+      startNewChat: async ({ deviceId, retryRunId }) => {
+        calls.newChat.push({ deviceId, retryRunId });
+        if (retryRunId && retryRunId.startsWith("history:")) {
+          return { error: "not_a_live_run", message: "That one is history." };
+        }
+        if (retryRunId && !retryAllowed) {
+          return { error: "retry_not_allowed", message: "That run didn't fail." };
+        }
+        const payload = { session_id: "api_new_chat_1", title: "" };
+        if (retryRunId) {
+          calls.dispatched.push(retryRunId);
+          payload.run_id = "run-retried";
+        }
+        return payload;
+      },
+    },
+  };
+}
+
+test("a dispatch Hermes refused is named, not called unreachable", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const response = await linkFetch(link, paired.credential, "/link/tasks", {
+    method: "POST",
+    body: JSON.stringify({ task: "Summarise yesterday's commits" }),
+  });
+  // Hermes is running perfectly well; 409, not a 502 "unreachable".
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error, "session_in_use");
+  assert.equal(response.body.recovery, "start_new_chat");
+  assert.equal(response.body.message, SESSION_IN_USE_FAILURE.message);
+  assert.doesNotMatch(JSON.stringify(response.body), /not reachable/i);
+  assert.doesNotMatch(JSON.stringify(response.body), new RegExp(SHARED_KEY));
+});
+
+test("a failed run carries its reason on the list, the status and the result", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const list = await linkFetch(link, paired.credential, "/link/tasks");
+  assert.equal(list.status, 200);
+  const failed = list.body.tasks.find((run) => run.run_id === "run-failed");
+  assert.deepEqual(failed.failure, SESSION_IN_USE_FAILURE);
+  // Additive: a run that did not fail carries null, never an empty object.
+  assert.equal(list.body.tasks.find((run) => run.run_id === "run-ok").failure, null);
+  // Not asked for, not sent.
+  assert.equal(list.body.earlier, undefined);
+
+  const status = await linkFetch(link, paired.credential, "/link/tasks/run-failed");
+  assert.deepEqual(status.body.failure, SESSION_IN_USE_FAILURE);
+
+  const result = await linkFetch(link, paired.credential, "/link/tasks/run-failed/result");
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.failure, SESSION_IN_USE_FAILURE);
+  assert.doesNotMatch(JSON.stringify(result.body), new RegExp(SHARED_KEY));
+});
+
+test("the new-chat route refuses an unpaired caller and starts one for a paired one", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+
+  const unpaired = await linkFetch(link, "", "/link/sessions/new", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  assert.equal(unpaired.status, 401);
+  assert.deepEqual(unpaired.body, { error: "not_paired" });
+  assert.equal(desktop.calls.newChat.length, 0);
+
+  const { body: paired } = await pair(link);
+  const created = await linkFetch(link, paired.credential, "/link/sessions/new", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  assert.equal(created.status, 200);
+  assert.equal(created.body.session_id, "api_new_chat_1");
+  // No retry asked for, none performed.
+  assert.equal(created.body.run_id, undefined);
+  assert.deepEqual(desktop.calls.dispatched, []);
+
+  const wrongMethod = await linkFetch(link, paired.credential, "/link/sessions/new");
+  assert.equal(wrongMethod.status, 405);
+});
+
+test("the new-chat route re-dispatches exactly one brief when asked", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const recovered = await linkFetch(link, paired.credential, "/link/sessions/new", {
+    method: "POST",
+    body: JSON.stringify({ retry_run_id: "run-failed" }),
+  });
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.body.session_id, "api_new_chat_1");
+  assert.equal(recovered.body.run_id, "run-retried");
+  assert.deepEqual(desktop.calls.dispatched, ["run-failed"]);
+});
+
+test("the new-chat retry guard refuses in words rather than starting work", async (t) => {
+  const desktop = fakeFailingDesktop({ retryAllowed: false });
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  // Not failed / not this device / failed for another reason all land here.
+  const refused = await linkFetch(link, paired.credential, "/link/sessions/new", {
+    method: "POST",
+    body: JSON.stringify({ retry_run_id: "run-ok" }),
+  });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "retry_not_allowed");
+  assert.match(refused.body.message, /didn't fail/);
+  assert.deepEqual(desktop.calls.dispatched, []);
+
+  // A restored run is not a live run and can never be retried.
+  const restored = await linkFetch(link, paired.credential, "/link/sessions/new", {
+    method: "POST",
+    body: JSON.stringify({ retry_run_id: "history:s1:m1" }),
+  });
+  assert.equal(restored.status, 409);
+  assert.equal(restored.body.error, "not_a_live_run");
+
+  // A malformed id never reaches the desktop at all.
+  const malformed = await linkFetch(link, paired.credential, "/link/sessions/new", {
+    method: "POST",
+    body: JSON.stringify({ retry_run_id: "a/b" }),
+  });
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(desktop.calls.dispatched, []);
+});
+
+test("the new-chat route is rate limited per device", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const statuses = [];
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const response = await linkFetch(link, paired.credential, "/link/sessions/new", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    statuses.push(response.status);
+  }
+  assert.equal(statuses.filter((status) => status === 200).length, 6);
+  assert.equal(statuses.filter((status) => status === 429).length, 2);
+});
+
+test("scope=all adds the earlier chats without changing the default list", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+
+  const all = await linkFetch(link, paired.credential, "/link/tasks?scope=all");
+  assert.equal(all.status, 200);
+  assert.equal(all.body.tasks.length, 2);
+  assert.equal(all.body.earlier.length, 1);
+  assert.equal(all.body.earlier[0].session_id, "20260916_174926_797a3b");
+  assert.equal(all.body.earlier[0].read_only, true);
+});
+
+test("a restored run id survives routing and is refused by every write action", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  const id = encodeURIComponent("history:20260916_174926_797a3b:msg_41");
+
+  for (const [path, method] of [
+    [`/link/tasks/${id}/stop`, "POST"],
+    [`/link/tasks/${id}/announced`, "POST"],
+  ]) {
+    const response = await linkFetch(link, paired.credential, path, { method });
+    assert.equal(response.status, 409, path);
+    assert.equal(response.body.error, "not_a_live_run", path);
+  }
+  const approval = await linkFetch(link, paired.credential, `/link/tasks/${id}/approval`, {
+    method: "POST",
+    body: JSON.stringify({ decision: "once" }),
+  });
+  assert.equal(approval.status, 409);
+  assert.equal(approval.body.error, "not_a_live_run");
+});
+
+test("a run id with a separator is still refused however it is encoded", async (t) => {
+  const desktop = fakeFailingDesktop();
+  const link = await startLink({ tasks: desktop.tasks });
+  t.after(() => link.close());
+  const { body: paired } = await pair(link);
+  for (const id of ["%2E%2E", "..", "%2F..%2Fetc", "%5Cwindows"]) {
+    const response = await linkFetch(link, paired.credential, `/link/tasks/${id}`);
+    assert.ok(response.status === 404 || response.status === 405, `${id} → ${response.status}`);
+  }
 });

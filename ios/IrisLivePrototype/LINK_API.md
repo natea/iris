@@ -1595,3 +1595,213 @@ Activity token lives in the same APNs environment as the alert token.
 5. When the activity is `.stale`, say the Mac stopped reporting. Do not keep
    animating as if work continues.
 6. A widget shows `generated_at`, not a pretense of being live.
+
+---
+
+## 15. Failure reasons and recovery
+
+Every Hermes failure used to arrive at the phone as the same sentence —
+*"Hermes is not reachable from your Mac. Nothing was sent."* — or as a bare
+`FAILED`. That sentence was frequently a lie: the gateway's HTTP health check
+stayed green while the interactive backend crash-looped, and it was flatly
+wrong when Hermes was running and had simply refused.
+
+The desktop now classifies every failure in one place
+(`electron/hermesFailure.mjs`) and hands the phone a code, one plain sentence,
+and a machine hint for what would fix it.
+
+### 15.1 The codes
+
+`code` is stable, snake_case, and part of this contract. `recovery` is one of
+`start_new_chat`, `retry`, `check_mac`, `none`.
+
+| `code` | What actually happened | `recovery` | HTTP (at dispatch) |
+|---|---|---|---|
+| `session_in_use` | Hermes allows one client per chat, and something else holds this one (usually the Hermes Desktop app). Hermes is healthy. | `start_new_chat` | 409 |
+| `backend_start_failed` | `hermes serve` would not come up — timed out, exited before ready, or no usable runtime. The message names a cause when the log tail gives one, e.g. *"Hermes' backend would not start (MCP server 'strava' failed to authenticate)."* | `check_mac` | 502 |
+| `model_unreachable` | Hermes is up; its AI model service is not. | `retry` | 502 |
+| `auth_failed` | The shared `API_SERVER_KEY` between Iris and Hermes does not match (401). | `check_mac` | 502 |
+| `gateway_unreachable` | Nothing answered on `127.0.0.1:8642`. **This is the only code that means "Hermes is not reachable".** | `check_mac` | 502 |
+| `run_limit` | Hermes hit its iteration budget before finishing. | `retry` | 409 |
+| `stopped_by_user` | Somebody stopped the run. | `none` | 409 |
+| `unknown` | Nothing matched. The sentence quotes the original first line; it is never dropped. | `retry` | 502 |
+
+Two further codes are refusals rather than Hermes failures:
+`not_a_live_run` (409) — a transcript-restored run was asked to do something
+only a live run can do — and `retry_not_allowed` (409), see §15.3.
+
+The phone MUST NOT print "Hermes is not reachable" for any code other than
+`gateway_unreachable` (or a transport-level `LinkError.unreachable`, which is
+about the *Mac*, not about Hermes).
+
+### 15.2 The `failure` object
+
+`GET /link/tasks`, `GET /link/tasks/:id` and `GET /link/tasks/:id/result` carry
+`failure` on a run whose status is `failed` or `error`, and `null` on every
+other run. It is additive: an older phone ignores it.
+
+```json
+{
+  "run_id": "iris_9c1a…",
+  "status": "failed",
+  "failure": {
+    "code": "session_in_use",
+    "message": "That chat is open in Hermes Desktop. Close it there, or I can start a new chat.",
+    "recovery": "start_new_chat",
+    "detail": "This chat is open in another Hermes window/terminal. Use it there, or start a new chat here."
+  }
+}
+```
+
+- `message` — one plain sentence, in Iris's voice, safe to speak and safe on a
+  lock screen. Redacted, control-character-free, ≤ 240 chars.
+- `detail` — the sanitized first line of Hermes' own text, ≤ 400 chars. Show it
+  behind a disclosure for debugging; never lead with it.
+- Decode tolerantly: an unknown `code` is shown with its `message` if there is
+  one, and otherwise falls back to the generic sentence **while keeping
+  `detail`**.
+
+A dispatch failure carries the same vocabulary in the error body:
+`{ "error": "<code>", "message": "…", "recovery": "…" }`.
+
+The `run_complete` push (§11) adds `failure_code` and `recovery`, and its alert
+body is the `message` rather than the task title, so a locked phone learns the
+reason without opening anything. It still carries no result text.
+
+### 15.3 `POST /link/sessions/new` — the one-tap recovery
+
+Bearer-authed, rate limited to 6 per minute per device.
+
+```
+POST /link/sessions/new
+{ "retry_run_id": "iris_9c1a…" }     // optional
+→ 200 { "session_id": "api_…", "title": "", "run_id": "iris_2f7b…" }
+```
+
+It creates a fresh Hermes chat through the same function the desktop's session
+switcher uses and pins it.
+
+> **This deliberately changes the pinned session for the desktop as well.**
+> There is one pinned chat, not one per surface — that is what "start a new
+> chat" means. The Mac emits its `hermes_session_changed` renderer event so the
+> desktop's Work Stream follows without a restart. The old chat is untouched
+> and stays in Hermes.
+
+With `retry_run_id`, and **only** when that run is FAILED, dispatched by *this*
+device, and failed with `session_in_use`, its exact brief is re-dispatched into
+the new chat and `run_id` comes back too. Every other case is a `409`:
+
+| Case | `error` |
+|---|---|
+| Not failed | `retry_not_allowed` |
+| Another device's run | `retry_not_allowed` |
+| Failed for a different reason | `retry_not_allowed` |
+| A `history:…` id | `not_a_live_run` |
+| Unknown id | `task_unknown` (404) |
+
+If the chat was created but the retry could not be dispatched, the response
+still carries `session_id` plus `retry_error` / `retry_message`. The new chat
+really was made; say so, and do not claim the work restarted.
+
+**There is no tool for this route.** The model cannot reach it. Starting a new
+chat is a deliberate tap on a trusted surface, confirmed once. If the user asks
+Iris by voice to start a new chat, Iris tells them to tap the button.
+
+### 15.4 `SYSTEM_EVENT_HERMES_COMPLETE` for a failed run
+
+For a failed run the event replaces the "summarize the result" block entirely:
+
+```
+SYSTEM_EVENT_HERMES_COMPLETE
+run_id: <id>
+status: failed
+failure_code: session_in_use
+recovery: start_new_chat
+instructions_to_iris:
+- The task did NOT run. Tell <name> that, in one short sentence, and give the reason below in plain words.
+- Say the reason as written. Do not restate it as a network problem, and do not say Hermes is unreachable unless the reason says so.
+- You have NO result. Do not summarize, predict, or invent one.
+- Offer the fix out loud, then stop: tell <name> they can tap "Start a new chat and try again" on the run in the Iris app.
+- You CANNOT start a new chat yourself and there is no tool for it. If they ask you to, say it has to be the button — it changes which chat the Mac uses too.
+failure_reason:
+That chat is open in Hermes Desktop. Close it there, or I can start a new chat.
+```
+
+There is no `authoritative_hermes_result` line, because there is no result.
+
+---
+
+## 16. Restored runs and earlier chats
+
+The desktop's Work Stream shows the run registry **merged** with runs rebuilt
+from the pinned session's Hermes transcript. `GET /link/tasks` used to show the
+registry alone, so the moment the pinned session changed the phone showed one
+run where the Mac showed thirteen.
+
+### 16.1 The merge rule
+
+`GET /link/tasks` now returns, for the pinned session:
+
+1. every registry run, then
+2. every transcript-rebuilt run whose `run_id` is not already present **and**
+   whose task text (lowercased, trimmed) does not match a registry run's,
+
+sorted by `updated_at` descending and capped at 50. This is the same rule as
+the desktop's `fetchHermesHistory()`.
+
+The transcript read is cached for ~5 s, so a 5 s list poll does not re-read a
+2000-message transcript each time. **A transcript failure degrades to
+registry-only — never to an error.** Dispatch never waits on it.
+
+### 16.2 What a restored run looks like
+
+```json
+{
+  "run_id": "history:20260916_174926_797a3b:msg_412",
+  "task": "Summarise yesterday's commits",
+  "status": "completed",
+  "origin": "history",
+  "session_id": "20260916_174926_797a3b",
+  "restored": true,
+  "read_only": true,
+  "updated_at": 1789947620033,
+  "headline": "",
+  "step_count": 6,
+  "pending_approval": null,
+  "failure": null
+}
+```
+
+- `origin: "history"` is a new value in the `origin` vocabulary (§4), additive.
+- Timestamps are epoch **milliseconds**, like every other Link timestamp.
+- The list carries no step array and no output text.
+
+`GET /link/tasks/:id` and `GET /link/tasks/:id/result` resolve a `history:…`
+id from the transcript, so a restored row opens like any other. The run id
+contains colons; the phone percent-encodes the path segment, and the desktop's
+validator still rejects separators, control characters and traversal.
+
+### 16.3 What a restored run cannot do
+
+`stop`, `approval`, `announced` and the `retry_run_id` of §15.3 all refuse a
+`history:…` id with `409 not_a_live_run`. A restored run is a reconstruction of
+a finished conversation: there is nothing to stop, approve, announce or retry.
+
+The phone MUST NOT let a restored (or earlier) run trigger a completion
+announcement, a local notification, the active-runs strip, or a Live Activity.
+They are history, not news.
+
+### 16.4 Earlier chats — `GET /link/tasks?scope=all`
+
+When the pinned session changes, every run under the previous session becomes
+invisible in both apps. `scope=all` adds them as a **separate** array:
+
+```json
+{ "tasks": [ … ], "earlier": [ { "…": "…", "session_id": "…", "read_only": true, "restored": false } ] }
+```
+
+`earlier` holds registry runs from other sessions, newest first, capped at 100,
+each with its `session_id` so the phone can group them. They are read-only.
+
+Without `scope=all` the response is byte-for-byte what it always was, so an
+older phone build is unaffected.

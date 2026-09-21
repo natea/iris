@@ -167,6 +167,11 @@ public final class RunNotifier: NSObject, ObservableObject {
         runs.filter {
             $0.isTerminal
                 && $0.isFromThisPhone
+                // History, not news (LINK_API.md §16.3). A run rebuilt from
+                // the Hermes transcript, or one from a chat that is no longer
+                // pinned, finished long ago — buzzing about it would be a
+                // notification for something that already happened.
+                && !$0.isHistory
                 && !notified.contains($0.runId)
                 && !alreadyOnScreen.contains($0.runId)
         }
@@ -204,6 +209,14 @@ public final class RunNotifier: NSObject, ObservableObject {
     }
 
     nonisolated static func body(for run: LinkTask) -> String {
+        // A failed run leads with WHY. The task title tells the user nothing
+        // they can act on; the Mac's classified sentence does (§15.2). It is
+        // already redacted and capped, and carries no result text.
+        if let failure = run.failure, !failure.message.isEmpty {
+            return failure.message.count > 120
+                ? String(failure.message.prefix(117)) + "…"
+                : failure.message
+        }
         let firstLine = run.task
             .split(separator: "\n")
             .map(String.init)

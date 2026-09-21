@@ -91,4 +91,39 @@ actor FakeLinkService: LinkTaskService {
     func markAnnounced(runId: String) async throws {
         announced.append(runId)
     }
+
+    // MARK: Failure recovery and history (LINK_API.md §15.3 / §16.4)
+    //
+    // Declared here, not left to the protocol's default, because these are
+    // REQUIREMENTS and the whole point is that the existential dispatches to
+    // the real implementation. A test that proved only the default ran would
+    // prove nothing.
+
+    var newChatResult: Result<LinkNewChat, LinkError> = .success(
+        LinkNewChat(sessionId: "api_new_1", runId: "run-retried")
+    )
+    var allTasks = LinkTaskList(tasks: [], earlier: [])
+    /// Every `startNewChat` this double was asked for — so a test can prove a
+    /// double tap made exactly ONE chat.
+    private(set) var newChatCalls: [String?] = []
+
+    func setNewChatResult(_ value: Result<LinkNewChat, LinkError>) { newChatResult = value }
+    func setAllTasks(_ value: LinkTaskList) { allTasks = value }
+    func newChatCallCount() -> Int { newChatCalls.count }
+    func newChatRetryIds() -> [String?] { newChatCalls }
+
+    /// A gate a test can hold shut, so two taps really do overlap.
+    var newChatDelayNanoseconds: UInt64 = 0
+
+    func setNewChatDelay(_ value: UInt64) { newChatDelayNanoseconds = value }
+
+    func startNewChat(retryRunId: String?) async throws -> LinkNewChat {
+        newChatCalls.append(retryRunId)
+        if newChatDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: newChatDelayNanoseconds)
+        }
+        return try newChatResult.get()
+    }
+
+    func listAllTasks() async throws -> LinkTaskList { allTasks }
 }

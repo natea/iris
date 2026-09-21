@@ -252,7 +252,8 @@ final class UserControlConfirmationTests: XCTestCase {
         let outcome = await router.confirmByUserControl(proposalId: id)
         XCTAssertEqual(
             outcome,
-            .failed(message: "Hermes is not reachable from your Mac. Nothing was sent."))
+            .failed(message: "Hermes is not reachable from your Mac. Nothing was sent.",
+                    recovery: nil))
 
         let staged = await router.pendingProposal()
         XCTAssertEqual(staged?.id, id, "the brief stays on screen so it can be tried again")
@@ -344,8 +345,11 @@ final class UserControlConfirmationTests: XCTestCase {
         let id = try await stage(router)
 
         let outcome = await coordinator.answerStagedProposal(.yes, proposalId: id)
-        guard case .failed(let message) = outcome else { return XCTFail("\(outcome)") }
+        guard case .failed(let message, let recovery) = outcome else { return XCTFail("\(outcome)") }
         XCTAssertTrue(message.hasSuffix("Nothing was sent."))
+        // A genuinely unreachable Hermes is not something a tap can fix, so
+        // no recovery button is offered on the card (LINK_API.md §15.3).
+        XCTAssertNil(recovery)
 
         let turns = await transport.turns()
         XCTAssertFalse(

@@ -77,3 +77,39 @@ test("completion events include the entire Hermes result", () => {
   );
   assert.match(event, /5000\. Personal skill and complete description$/);
 });
+
+test("a failed run's completion event carries the reason and forbids a result", () => {
+  const text = formatHermesCompletionEvent({
+    runId: "run-7",
+    status: "failed",
+    output: "",
+    userName: "Nate",
+    failure: {
+      code: "session_in_use",
+      message: "That chat is open in Hermes Desktop. Close it there, or I can start a new chat.",
+      recovery: "start_new_chat",
+      detail: "",
+    },
+  });
+  assert.match(text, /^SYSTEM_EVENT_HERMES_COMPLETE\n/);
+  assert.match(text, /failure_code: session_in_use/);
+  assert.match(text, /recovery: start_new_chat/);
+  assert.match(text, /The task did NOT run\./);
+  assert.match(text, /That chat is open in Hermes Desktop\./);
+  // Iris must not claim a result, and must not reach for a tool that does not
+  // exist: starting a new chat is a tap on the phone, not a model action.
+  assert.doesNotMatch(text, /authoritative_hermes_result/);
+  assert.match(text, /Start a new chat and try again/);
+  assert.match(text, /You CANNOT start a new chat yourself/);
+});
+
+test("a completed run's event is untouched by the failure path", () => {
+  const text = formatHermesCompletionEvent({
+    runId: "run-8",
+    status: "completed",
+    output: "42 files",
+    userName: "Nate",
+  });
+  assert.match(text, /authoritative_hermes_result:\n42 files$/);
+  assert.doesNotMatch(text, /failure_code/);
+});

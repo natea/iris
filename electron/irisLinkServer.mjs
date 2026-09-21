@@ -1,4 +1,5 @@
 import http from "node:http";
+import { classifyHermesFailure } from "./hermesFailure.mjs";
 
 // Iris Link is a network-reachable door to a terminal-capable agent, so every
 // default here is the restrictive one: no CORS, no cache, a tiny body cap, an
@@ -21,6 +22,12 @@ export const GEMINI_TOKEN_PURPOSES = Object.freeze(["session", "preview"]);
 
 // Handler failures are named, not improvised: the phone branches on these and
 // the contract document lists every one.
+//
+// The block below the line is the classified Hermes failure vocabulary
+// (hermesFailure.mjs). Before it existed, every one of these arrived as
+// `agent_unreachable` and the phone said "Hermes is not reachable from your
+// Mac" — which, for a Hermes that was running and had simply refused, was a
+// lie. `agent_unreachable` now means only what it says.
 const TASK_ERROR_STATUS = Object.freeze({
   task_unknown: 404,
   task_not_finished: 409,
@@ -28,7 +35,26 @@ const TASK_ERROR_STATUS = Object.freeze({
   approval_not_pending: 409,
   agent_unreachable: 502,
   dispatch_failed: 502,
+  // ----- classified failures -----
+  // Hermes is up and refused: another client holds the chat.
+  session_in_use: 409,
+  backend_start_failed: 502,
+  model_unreachable: 502,
+  auth_failed: 502,
+  gateway_unreachable: 502,
+  run_limit: 409,
+  stopped_by_user: 409,
+  unknown: 502,
+  // ----- read-only runs -----
+  // A run rebuilt from the Hermes transcript, asked to do something only a
+  // live run can do.
+  not_a_live_run: 409,
+  retry_not_allowed: 409,
 });
+
+// Starting a new Hermes chat is cheap but not free, and it repins the session
+// for the desktop too. A light limit, not a security control.
+export const NEW_SESSION_RATE_LIMIT = { windowMs: 60_000, max: 6 };
 
 // Hop-by-hop headers are connection-scoped; forwarding them through a proxy is
 // how request smuggling and connection confusion start.
@@ -194,6 +220,7 @@ export function createIrisLinkServer({
   const getSessionKey = hermes.getSessionKey || (() => "");
   const fetchImpl = hermes.fetchImpl || globalThis.fetch;
   const pairLimiter = createRateLimiter(PAIR_RATE_LIMIT);
+  const newSessionLimiter = createRateLimiter(NEW_SESSION_RATE_LIMIT);
 
   // Log lines are built here and nowhere else, so no credential, token,
   // pairing secret or shared key can reach them.
@@ -549,11 +576,15 @@ export function createIrisLinkServer({
     return handler;
   }
 
-  function sendTaskError(res, error, message) {
+  // `message` is one plain sentence for a person; `recovery` is the machine
+  // hint the phone's buttons branch on. Neither ever carries result text or a
+  // credential — hermesFailure.mjs is the only thing that writes them.
+  function sendTaskError(res, error, message, recovery) {
     const code = String(error || "internal_error");
     sendJson(res, TASK_ERROR_STATUS[code] || 500, {
       error: code,
       ...(message ? { message: String(message).slice(0, 500) } : {}),
+      ...(recovery ? { recovery: String(recovery).slice(0, 40) } : {}),
     });
   }
 
@@ -579,7 +610,7 @@ export function createIrisLinkServer({
     try {
       const result = await handler({ task, urgency, deviceId: device.id });
       if (result?.error) {
-        sendTaskError(res, result.error, result.message);
+        sendTaskError(res, result.error, result.message, result.recovery);
         return;
       }
       if (!result?.run_id) {
@@ -594,8 +625,15 @@ export function createIrisLinkServer({
         origin: String(result.origin || `device:${device.id}`),
       });
     } catch (error) {
-      logEvent("warn", `Iris Link could not dispatch a task: ${String(error?.name || "Error")}`);
-      sendTaskError(res, "agent_unreachable", error?.message);
+      // A thrown dispatch used to become a blanket `agent_unreachable`. It is
+      // classified now: only a genuinely unreachable Hermes gets that name,
+      // and everything else gets its own code plus a sentence.
+      const failure = classifyHermesFailure(error);
+      logEvent(
+        "warn",
+        `Iris Link could not dispatch a task: ${failure.code} (${String(error?.name || "Error")})`,
+      );
+      sendTaskError(res, failure.code, failure.message, failure.recovery);
     }
   }
 
@@ -604,8 +642,73 @@ export function createIrisLinkServer({
     if (!handler) return;
     const params = new URLSearchParams(rawQuery || "");
     const undelivered = params.get("undelivered") === "1";
-    const list = (await handler({ deviceId: device.id, undelivered })) || [];
-    sendJson(res, 200, { tasks: Array.isArray(list) ? list : [] });
+    // `scope=all` additionally returns the runs from chats that are no longer
+    // pinned. Anything else — including no parameter — behaves exactly as it
+    // always has, so an older phone build sees no change.
+    const scope = params.get("scope") === "all" ? "all" : "";
+    const list = (await handler({ deviceId: device.id, undelivered, scope })) || [];
+    // Both shapes are accepted: an array is the pre-`earlier` contract.
+    if (Array.isArray(list)) {
+      sendJson(res, 200, { tasks: list });
+      return;
+    }
+    sendJson(res, 200, {
+      tasks: Array.isArray(list.tasks) ? list.tasks : [],
+      ...(Array.isArray(list.earlier) ? { earlier: list.earlier } : {}),
+    });
+  }
+
+  // ===== POST /link/sessions/new — the one-tap recovery =====
+  //
+  // Starts a fresh Hermes chat and pins it, through the same function the
+  // desktop's own session switcher uses. With `retry_run_id` it also
+  // re-dispatches that run's exact brief into the new chat, so a phone tap
+  // both fixes the cause and gets the work moving again.
+  //
+  // The guards live in the desktop handler, not here: this route only ever
+  // relays their refusals. There is no model route to it.
+  async function handleNewSession(req, res, device, body) {
+    const handler = requireHandler(res, "startNewChat");
+    if (!handler) return;
+    if (!newSessionLimiter.allow(device.id)) {
+      sendJson(res, 429, { error: "rate_limited" });
+      return;
+    }
+    const payload = parseJsonBody(res, body);
+    if (!payload) return;
+    let retryRunId = "";
+    if (payload.retry_run_id !== undefined && payload.retry_run_id !== null) {
+      retryRunId = String(payload.retry_run_id).trim();
+      if (!retryRunId || retryRunId.length > 200 || /[\x00-\x1f/\\]/.test(retryRunId)) {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+    }
+    try {
+      const result = (await handler({ deviceId: device.id, retryRunId })) || {};
+      if (result.error) {
+        sendTaskError(res, result.error, result.message, result.recovery);
+        return;
+      }
+      if (!result.session_id) {
+        sendTaskError(res, "dispatch_failed", "Hermes did not return a new chat.");
+        return;
+      }
+      logEvent("info", "A paired device started a new Hermes chat.", { deviceId: device.id });
+      sendJson(res, 200, {
+        session_id: String(result.session_id),
+        ...(result.title ? { title: String(result.title).slice(0, 200) } : {}),
+        ...(result.run_id ? { run_id: String(result.run_id) } : {}),
+        ...(result.retry_error ? { retry_error: String(result.retry_error) } : {}),
+        ...(result.retry_message
+          ? { retry_message: String(result.retry_message).slice(0, 500) }
+          : {}),
+      });
+    } catch (error) {
+      const failure = classifyHermesFailure(error);
+      logEvent("warn", `Iris Link could not start a new Hermes chat: ${failure.code}`);
+      sendTaskError(res, failure.code, failure.message, failure.recovery);
+    }
   }
 
   // `?steps_since=<cursor|step id>` lets a polling phone ask for only the
@@ -695,7 +798,11 @@ export function createIrisLinkServer({
     } catch {
       return null;
     }
+    // A colon is allowed because a transcript-restored run is identified as
+    // `history:<session>:<message>` — the phone percent-encodes the segment.
+    // Separators, control characters and traversal are still refused.
     if (!runId || runId.length > 200 || /[\x00-\x1f/\\]/.test(runId)) return null;
+    if (runId === "." || runId === "..") return null;
     return { runId, action: segments[1] || "" };
   }
 
@@ -904,6 +1011,15 @@ export function createIrisLinkServer({
         return;
       }
       sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+
+    if (rawPath === "/link/sessions/new") {
+      if (method !== "POST") {
+        sendJson(res, 405, { error: "method_not_allowed" });
+        return;
+      }
+      await handleNewSession(req, res, device, body);
       return;
     }
 

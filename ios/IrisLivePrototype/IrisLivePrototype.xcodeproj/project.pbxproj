@@ -77,6 +77,7 @@
 		C98B815AE9219B9FFB72373B /* NavigationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8034272BB038666CFD910B1 /* NavigationUITests.swift */; };
 		CA578E68AF833CD5A331909D /* IrisActivityPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC39509FCA98A446F5317265 /* IrisActivityPresentation.swift */; };
 		CF132B420B670D7A241E94E7 /* IrisRunActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4FE292B5C74BD8E5F7CDDAD /* IrisRunActivityAttributes.swift */; };
+		D03BFCEF4AAADEF447AB4EB9 /* FailureDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0252728FDE05A5EE08F2C92 /* FailureDecodingTests.swift */; };
 		D2761F13790975C08B358508 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5A3592095F69FC15A205046 /* KeychainStore.swift */; };
 		D976C4513B23EC422E27B8EA /* AnswerButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C20141D912CDD83949B0CF /* AnswerButtons.swift */; };
 		D985CC56BA83BB1A3BBAB852 /* DispatchGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9EBD17A6B834DB2DCC6813D /* DispatchGate.swift */; };
@@ -87,6 +88,7 @@
 		EA530D547699C8923580B34B /* IrisWidgetSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBD2A6DE860C68679748FD7 /* IrisWidgetSnapshot.swift */; };
 		ED8F78B204CC80AEBCAAD64B /* LinkTaskServiceDispatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83071A7D3D6AAB2E9011024E /* LinkTaskServiceDispatchTests.swift */; };
 		EEFBB86A57B38AC00AFEAC36 /* FakeLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */; };
+		F141A28C7ABDD50136BC9863 /* NewChatRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1DC530A78D53F2F601C955 /* NewChatRecovery.swift */; };
 		F15380367867CC6CFC28352C /* IrisLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B3AFCB650D2C9B572F8ED6A /* IrisLiveActivityWidget.swift */; };
 		F1CC123246E9E23C45CD569A /* ToolRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9FED6DA41D3A314036A5068 /* ToolRouter.swift */; };
 		F2CCDEB787C4E7CAEB08FB3F /* AnswerButtonUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F4AFBF57EDCAAE5333390A /* AnswerButtonUITests.swift */; };
@@ -194,10 +196,12 @@
 		B717CEDDAA3BF671E2AD2EC3 /* LiveActivityPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityPlanTests.swift; sourceTree = "<group>"; };
 		B8034272BB038666CFD910B1 /* NavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationUITests.swift; sourceTree = "<group>"; };
 		BC39509FCA98A446F5317265 /* IrisActivityPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisActivityPresentation.swift; sourceTree = "<group>"; };
+		BD1DC530A78D53F2F601C955 /* NewChatRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewChatRecovery.swift; sourceTree = "<group>"; };
 		BEBD2A6DE860C68679748FD7 /* IrisWidgetSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisWidgetSnapshot.swift; sourceTree = "<group>"; };
 		C1FD22C18E3043EBFE45D66A /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
 		C9FED6DA41D3A314036A5068 /* ToolRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolRouter.swift; sourceTree = "<group>"; };
 		CD96A45D465FF49D4CE142CE /* RunProgressFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunProgressFixtures.swift; sourceTree = "<group>"; };
+		D0252728FDE05A5EE08F2C92 /* FailureDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FailureDecodingTests.swift; sourceTree = "<group>"; };
 		D1C20141D912CDD83949B0CF /* AnswerButtons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswerButtons.swift; sourceTree = "<group>"; };
 		D3F4AFBF57EDCAAE5333390A /* AnswerButtonUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswerButtonUITests.swift; sourceTree = "<group>"; };
 		D4383840DB1117778529524E /* IrisLivePrototypeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IrisLivePrototypeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -276,6 +280,7 @@
 				1451F46CEDCAE9D40B39428B /* ActivityRenderTests.swift */,
 				77A07619E6E4C3862B5B114E /* ApprovalAnsweringTests.swift */,
 				DA7D15764E1D509276093802 /* DispatchGateTests.swift */,
+				D0252728FDE05A5EE08F2C92 /* FailureDecodingTests.swift */,
 				42E08B8E00B2FD936FC0D87F /* FakeLinkService.swift */,
 				88FDA668540E753A20CE13E7 /* IrisRunLinkTests.swift */,
 				6155B1B22EE93F99799A4D54 /* LinkLiveActivityRouteTests.swift */,
@@ -324,6 +329,7 @@
 				4189F82A2B6C03639E03D5A1 /* LiveClient.swift */,
 				E5E66E3826AB55C6789CD430 /* MainView.swift */,
 				69EFBFA82632C29FEC935739 /* MarkdownText.swift */,
+				BD1DC530A78D53F2F601C955 /* NewChatRecovery.swift */,
 				EEA2C82FF7A7521FAED0FD9A /* PairingSheet.swift */,
 				44158FCF676922C803B51D76 /* PreviewFixture.swift */,
 				DA10968ADB5F54903F8DDE33 /* PushService.swift */,
@@ -518,6 +524,7 @@
 				557B9782087E946FCEC33BA6 /* LiveClient.swift in Sources */,
 				9DE247868CF170B5C4868A2F /* MainView.swift in Sources */,
 				FA9DB0C54BA7DABD964CED5C /* MarkdownText.swift in Sources */,
+				F141A28C7ABDD50136BC9863 /* NewChatRecovery.swift in Sources */,
 				FCFA9AD0EF4E33E25D853544 /* PairingSheet.swift in Sources */,
 				4216F818E63662E553C51500 /* PreviewFixture.swift in Sources */,
 				53B26F23DB9C9EDE6BFF2AA3 /* PushService.swift in Sources */,
@@ -549,6 +556,7 @@
 				69A1340294FC0261455E9AC7 /* ActivityRenderTests.swift in Sources */,
 				DDC72DFC46AF074500FDD884 /* ApprovalAnsweringTests.swift in Sources */,
 				E674095376CE083F2734612B /* DispatchGateTests.swift in Sources */,
+				D03BFCEF4AAADEF447AB4EB9 /* FailureDecodingTests.swift in Sources */,
 				EEFBB86A57B38AC00AFEAC36 /* FakeLinkService.swift in Sources */,
 				B4D93A72BDCA5F6D2CF6E233 /* IrisRunLinkTests.swift in Sources */,
 				0089792744ABF919DB2F660F /* LinkLiveActivityRouteTests.swift in Sources */,

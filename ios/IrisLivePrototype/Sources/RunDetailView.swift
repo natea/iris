@@ -62,10 +62,25 @@ final class RunDetailController: ObservableObject {
     let seed: LinkTask
     private let service: LinkTaskService?
 
+    /// The one-tap recovery. Its only callers are this screen's buttons.
+    let recovery: NewChatRecoveryController
+
     init(seed: LinkTask, service: LinkTaskService?) {
         self.seed = seed
         self.service = service
+        self.recovery = NewChatRecoveryController(service: service)
     }
+
+    /// §15.2 — why it failed. Live state first, the row that was tapped until
+    /// the first poll returns, and nothing at all for a run that did not fail.
+    var failure: LinkFailure? {
+        if let live = status?.failure { return live }
+        return status == nil ? seed.failure : nil
+    }
+
+    /// §16.3 — a restored run, or one from a chat that is no longer pinned.
+    /// No Stop, no approval buttons, no recovery: there is nothing to act on.
+    var isReadOnly: Bool { seed.isHistory || (status?.isHistory ?? false) }
 
     var runId: String { seed.runId }
 
@@ -156,6 +171,20 @@ final class RunDetailController: ObservableObject {
         guard let service, result == nil else { return }
         do {
             let stored = try await service.taskResult(runId: runId)
+            // A failed run's reason comes with its result; never lose it.
+            if let failure = stored.failure, status?.failure == nil, let current = status {
+                status = LinkTaskStatus(
+                    runId: current.runId, task: current.task, origin: current.origin,
+                    status: current.status, instructions: current.instructions,
+                    output: current.output, error: current.error,
+                    pendingApproval: current.pendingApproval, failure: failure,
+                    restored: current.restored, readOnly: current.readOnly
+                )
+            }
+            // An empty output on a FAILED run is not "no text output" — the
+            // failure card above already says what happened, and printing a
+            // fake "Result" under it would only muddy that.
+            if stored.output.isEmpty, failure != nil { return }
             result = stored.output.isEmpty ? "(Hermes returned no text output.)" : stored.output
         } catch LinkError.taskNotFinished {
             // Raced the status; the next visit will pick it up.
@@ -204,6 +233,16 @@ final class RunDetailController: ObservableObject {
         await fetchOnce()
     }
 
+    /// The ONLY caller is the failure card's confirmed button. Exactly-once
+    /// lives in the controller, so a double tap makes one chat.
+    func startNewChat() async {
+        let outcome = await recovery.start(retryRunId: runId)
+        if case .failed(let text) = outcome { message = text } else { message = "" }
+        // The retried run is a different run; refresh so this screen stops
+        // claiming to be the live one.
+        await fetchOnce()
+    }
+
     func stop() async {
         guard let service else { return }
         isStopping = true
@@ -249,6 +288,10 @@ struct RunDetailView: View {
     /// while these are nil, and only a tap can set them.
     @State private var confirmApproval: PendingApproval?
     @State private var confirmDenial: PendingApproval?
+    /// The recovery awaiting its single explicit confirmation. Nothing is sent
+    /// while this is false, and only a tap can set it.
+    @State private var confirmNewChat = false
+    @State private var failureDetailExpanded = false
     @AppStorage(Handedness.storageKey) private var handednessSetting = Handedness.right.rawValue
 
     private var handedness: Handedness {
@@ -295,6 +338,10 @@ struct RunDetailView: View {
             List {
                 headerSection
                 approvalSection
+                // Above the result on purpose: for a failed run the reason IS
+                // the result, and burying it under an empty "Result" section
+                // is how the generic sentence survived for so long.
+                failureSection
                 briefSection
                 if controller.isActive { liveSection }
                 stepsSection
@@ -381,6 +428,124 @@ struct RunDetailView: View {
         } message: { approval in
             Text(approval.summary)
         }
+        // One confirmation, and it names the consequence the user cannot see
+        // from the phone: the Mac's pinned chat changes too.
+        .confirmationDialog(
+            "Start a new Hermes chat?",
+            isPresented: $confirmNewChat,
+            titleVisibility: .visible
+        ) {
+            Button("Start a new chat and try again") {
+                confirmNewChat = false
+                Task { await controller.startNewChat() }
+            }
+            Button("Cancel", role: .cancel) { confirmNewChat = false }
+        } message: {
+            Text(NewChatRecoveryController.confirmationMessage)
+        }
+    }
+
+    // MARK: Why it failed (LINK_API.md §15)
+
+    /// The Mac's own sentence, never one this app made up, and never the old
+    /// "Hermes is not reachable from your Mac" unless the code really says so.
+    /// Hermes' raw text stays available behind a disclosure for debugging.
+    @ViewBuilder
+    private var failureSection: some View {
+        if let failure = controller.failure {
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Why it failed", systemImage: "exclamationmark.octagon.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.red)
+
+                    Text(failure.message)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("failure-message")
+
+                    if !failure.detail.isEmpty {
+                        DisclosureGroup(isExpanded: $failureDetailExpanded) {
+                            Text(failure.detail)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                                .padding(.top, 4)
+                                .accessibilityIdentifier("failure-detail")
+                        } label: {
+                            Text("What Hermes said")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityIdentifier("failure-detail-disclosure")
+                    }
+
+                    recoveryControl(for: failure)
+
+                    if let outcome = controller.recovery.outcome {
+                        Label(outcome.message, systemImage: outcome.isSuccess ? "checkmark.circle" : "xmark.circle")
+                            .font(.footnote)
+                            .foregroundStyle(outcome.isSuccess ? Color.secondary : Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("recovery-outcome")
+                    }
+                }
+                .padding(.vertical, 4)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Why it failed. \(failure.message)")
+            }
+        }
+    }
+
+    /// SECURITY INVARIANT: this button closure is the ONLY caller of
+    /// `controller.recovery.start`. No tool call, transcript line, system
+    /// event or push payload can reach it — a push can put this screen in
+    /// front of the user, and that is all. The model has no tool for it.
+    @ViewBuilder
+    private func recoveryControl(for failure: LinkFailure) -> some View {
+        // A restored run has nothing to recover: it finished long ago.
+        if controller.isReadOnly {
+            EmptyView()
+        } else if failure.recovery == .startNewChat, controller.recovery.newRunId == nil {
+            Button {
+                confirmNewChat = true
+            } label: {
+                HStack(spacing: 8) {
+                    if controller.recovery.isWorking {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "bubble.left.and.bubble.right.fill")
+                    }
+                    Text("Start a new chat and try again")
+                        .fontWeight(.semibold)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, minHeight: 50)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(controller.recovery.isWorking)
+            .accessibilityIdentifier("recovery-start-new-chat")
+            .accessibilityHint("Starts a new Hermes chat on your Mac and sends this task again")
+        } else if failure.recovery == .retry, controller.recovery.newRunId == nil {
+            // Deliberately NOT a re-dispatch: there is no safe exact retry for
+            // a run that failed for these reasons, and inventing one would
+            // send work the user did not ask for again. It tells them what to
+            // do instead, which is the honest thing a button can do here.
+            Text("Ask Iris to send that task again when you're ready.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("recovery-retry-advice")
+        } else if failure.recovery == .checkMac {
+            Text("This one needs fixing on your Mac. Iris can't do it from here.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("recovery-check-mac")
+        }
     }
 
     // MARK: The approval buttons (LINK_API.md §11.5)
@@ -397,7 +562,10 @@ struct RunDetailView: View {
     /// commands nobody has read yet are not on these buttons.
     @ViewBuilder
     private var approvalButtons: some View {
-        if let approval = controller.pendingApproval, approval.canApproveFromPhone {
+        // §16.3: a restored run is read-only. Nothing on it can be approved,
+        // and offering a button that the Mac would refuse is worse than none.
+        if let approval = controller.pendingApproval, approval.canApproveFromPhone,
+           !controller.isReadOnly {
             AnswerButtonBar(
                 affirmative: AnswerAction(
                     id: "run-approve",
@@ -726,7 +894,15 @@ struct RunDetailView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if controller.isActive {
+        if controller.isReadOnly {
+            // No Stop: there is nothing running. Share still makes sense.
+            if let result = controller.result {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: result) { Image(systemName: "square.and.arrow.up") }
+                        .accessibilityLabel("Share this result")
+                }
+            }
+        } else if controller.isActive {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Stop", role: .destructive) { confirmStop = true }
                     .accessibilityLabel("Stop this run")
@@ -958,6 +1134,34 @@ struct StepRow: View {
         RunDetailView(
             run: RunProgressFixtures.finishedRun,
             detail: RunProgressFixtures.finished,
+            result: RunProgressFixtures.resultText
+        )
+    }
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Failed — chat locked") {
+    NavigationStack {
+        RunDetailView(run: RunProgressFixtures.lockedRun, detail: RunProgressFixtures.locked)
+    }
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Failed — backend would not start") {
+    NavigationStack {
+        RunDetailView(
+            run: RunProgressFixtures.brokenBackendRun,
+            detail: RunProgressFixtures.brokenBackend
+        )
+    }
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Restored from an earlier chat") {
+    NavigationStack {
+        RunDetailView(
+            run: RunProgressFixtures.restoredRun,
+            detail: RunProgressFixtures.restored,
             result: RunProgressFixtures.resultText
         )
     }

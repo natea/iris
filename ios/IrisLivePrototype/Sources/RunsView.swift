@@ -69,6 +69,41 @@ final class RunsController: ObservableObject {
         runs = list
     }
 
+    // MARK: Earlier chats (LINK_API.md §16.4)
+    //
+    // When the pinned Hermes chat changes, every run under the previous one
+    // vanishes from both apps. They are still real work the user did, so they
+    // get their own collapsed group — loaded ON DEMAND, because a chat's worth
+    // of history is not something a 5 s list poll should be dragging around.
+    //
+    // They are read-only and they are history: they must never reach the
+    // notifier, the announcement queue, the active-runs strip or a Live
+    // Activity. `runs` is deliberately left untouched.
+
+    @Published private(set) var earlier: [LinkTask] = []
+    @Published private(set) var isLoadingEarlier = false
+    /// Nil until asked for. `false` means the Mac is older than §16.4 and
+    /// cannot answer — which is not the same as "there are none".
+    @Published private(set) var earlierAvailable: Bool?
+
+    func loadEarlier() async {
+        guard let client, !isLoadingEarlier else { return }
+        isLoadingEarlier = true
+        defer { isLoadingEarlier = false }
+        do {
+            let list = try await client.listAllTasks()
+            earlier = list.earlier
+            earlierAvailable = true
+        } catch let error as LinkError {
+            earlierAvailable = false
+            message = error.message
+            if error.clearsPairing { onLinkError?(error) }
+        } catch {
+            earlierAvailable = false
+            message = "Could not read the earlier chats."
+        }
+    }
+
     private var client: LinkClient? {
         guard let paired else { return nil }
         return LinkClient(paired: paired)

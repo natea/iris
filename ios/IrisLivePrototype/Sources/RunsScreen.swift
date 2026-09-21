@@ -26,7 +26,12 @@ extension LinkTask {
         return text.isEmpty ? "Untitled run" : text
     }
 
-    var originLabel: String { isFromThisPhone ? "from this phone" : "from the Mac" }
+    /// Where it came from. A restored run says so subtly rather than claiming
+    /// a phone or a Mac dispatched it — nothing here did (§16.2).
+    var originLabel: String {
+        if isHistory { return "from the chat history" }
+        return isFromThisPhone ? "from this phone" : "from the Mac"
+    }
 
     var statusSymbol: String {
         switch status.lowercased() {
@@ -82,6 +87,7 @@ struct RunsScreen: View {
     }
 
     @State private var path: [LinkTask] = []
+    @State private var earlierExpanded = false
 
     private var runsStack: some View {
         NavigationStack(path: $path) {
@@ -133,6 +139,7 @@ struct RunsScreen: View {
                         }
                     }
                 }
+                earlierSection
             }
             .listStyle(.insetGrouped)
             // Pushed, not presented: this sheet is already a presentation, and
@@ -173,6 +180,58 @@ struct RunsScreen: View {
                     path = [run]
                 }
                 #endif
+            }
+        }
+    }
+
+    /// Runs from chats that are no longer pinned (LINK_API.md §16.4).
+    /// Collapsed by default with a count, loaded on demand, and kept out of
+    /// Active / Finished entirely — they are history, not news.
+    @ViewBuilder
+    private var earlierSection: some View {
+        if injectedRuns == nil {
+            Section {
+                DisclosureGroup(isExpanded: $earlierExpanded) {
+                    if controller.isLoadingEarlier {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Reading earlier chats…").font(.footnote).foregroundStyle(.secondary)
+                        }
+                    } else if controller.earlierAvailable == false {
+                        Text("Iris on your Mac is too old to list earlier chats. Update it there.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if controller.earlier.isEmpty {
+                        Text("Nothing from an earlier chat.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(controller.earlier) { run in
+                            NavigationLink(value: run) {
+                                RunRow(run: run, isAnnouncing: false)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Earlier chats")
+                        if !controller.earlier.isEmpty {
+                            Text("\(controller.earlier.count)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .accessibilityIdentifier("earlier-chats")
+                .onChange(of: earlierExpanded) { _, expanded in
+                    // On demand: a chat's worth of history is not something a
+                    // 5 s poll should be dragging around.
+                    guard expanded, controller.earlierAvailable == nil else { return }
+                    Task { await controller.loadEarlier() }
+                }
+            } footer: {
+                Text("Work from Hermes chats that are no longer pinned. Read-only.")
             }
         }
     }
@@ -240,6 +299,16 @@ struct RunRow: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
+                // §15.2: a failed row says WHY, here, in the list. "FAILED"
+                // with no reason is the thing this replaces.
+                if let reason = failureLine {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("run-row-failure")
+                }
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -261,9 +330,16 @@ struct RunRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(run.displayTitle)
         .accessibilityValue(
-            ([run.needsAttention ? "Hermes is waiting for you" : nil, subtitle, liveLine])
+            ([run.needsAttention ? "Hermes is waiting for you" : nil, failureLine, subtitle, liveLine])
                 .compactMap { $0 }.joined(separator: " · ")
         )
+    }
+
+    /// The Mac's own sentence for a failed run, or nil. Never a sentence this
+    /// app invented, and never the generic "not reachable" line.
+    private var failureLine: String? {
+        guard let failure = run.failure, !failure.message.isEmpty else { return nil }
+        return failure.message
     }
 
     private var subtitle: String {
@@ -295,7 +371,10 @@ struct ActiveRunsStrip: View {
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    private var active: [LinkTask] { Array(runs.filter { !$0.isTerminal }.prefix(2)) }
+    // History is never "in flight": a restored run finished long ago.
+    private var active: [LinkTask] {
+        Array(runs.filter { !$0.isTerminal && !$0.isHistory }.prefix(2))
+    }
 
     var body: some View {
         if !active.isEmpty {

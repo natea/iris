@@ -72,7 +72,89 @@ enum RunProgressFixtures {
         )
     )
 
-    static let runs: [LinkTask] = [waitingRun, activeRun, failingRun, macOnlyRun, blindRun, finishedRun]
+    // MARK: §15 — a run that failed for the reason that actually bit
+    //
+    // The Hermes Desktop app had Iris's pinned chat open, so Hermes refused.
+    // The phone used to show "Hermes is not reachable from your Mac. Nothing
+    // was sent." — which was untrue in every word that mattered.
+
+    static let sessionInUseFailure = LinkFailure(
+        code: .sessionInUse,
+        message: "That chat is open in Hermes Desktop. Close it there, or I can start a new chat.",
+        recovery: .startNewChat,
+        detail:
+            "This chat is open in another Hermes window/terminal. Use it there, or start a new chat here. "
+            + "Details: session 20260916_174926_797a3b opened by desktop 1h36m ago."
+    )
+
+    static let backendFailure = LinkFailure(
+        code: .backendStartFailed,
+        message: "Hermes' backend would not start (MCP server 'strava' failed to authenticate).",
+        recovery: .checkMac,
+        detail: "Timed out starting Hermes interactive backend."
+    )
+
+    static let lockedRun = LinkTask(
+        runId: "run-4e19bb70c3",
+        task: "Goal: Summarise yesterday's commits across electron/ and ios/.",
+        status: "failed", origin: "device:abc",
+        createdAt: ms(180), updatedAt: ms(174), headline: "", stepCount: 0,
+        failure: sessionInUseFailure
+    )
+
+    static let brokenBackendRun = LinkTask(
+        runId: "run-91f0ac4d22",
+        task: "Goal: Pull this week's Strava activities into the weekly note.",
+        status: "failed", origin: "device:abc",
+        createdAt: ms(2600), updatedAt: ms(2580), headline: "", stepCount: 0,
+        failure: backendFailure
+    )
+
+    /// §16.2 — rebuilt from the transcript of a chat that is no longer pinned.
+    static let restoredRun = LinkTask(
+        runId: "history:20260916_174926_797a3b:msg_412",
+        task: "Goal: Draft the release notes for 0.4.",
+        status: "completed", origin: "history",
+        createdAt: ms(86_400), updatedAt: ms(86_000), headline: "", stepCount: 3,
+        restored: true, readOnly: true, sessionId: "20260916_174926_797a3b"
+    )
+
+    static let locked = LinkTaskDetail(
+        task: LinkTaskStatus(
+            runId: lockedRun.runId, task: lockedRun.task, origin: lockedRun.origin,
+            status: "failed", failure: sessionInUseFailure
+        ),
+        headline: "", stepCount: 0, stepsCursor: 0,
+        stepsComplete: true, stepsTruncated: false, steps: []
+    )
+
+    static let brokenBackend = LinkTaskDetail(
+        task: LinkTaskStatus(
+            runId: brokenBackendRun.runId, task: brokenBackendRun.task,
+            origin: brokenBackendRun.origin, status: "failed", failure: backendFailure
+        ),
+        headline: "", stepCount: 0, stepsCursor: 0,
+        stepsComplete: true, stepsTruncated: false, steps: []
+    )
+
+    static let restored = LinkTaskDetail(
+        task: LinkTaskStatus(
+            runId: restoredRun.runId, task: restoredRun.task, origin: "history",
+            status: "completed", output: resultText, restored: true, readOnly: true
+        ),
+        headline: "", stepCount: 3, stepsCursor: 3,
+        stepsComplete: true, stepsTruncated: false,
+        steps: [
+            RunStep(id: "s1", index: 1, tool: "read_file", category: .file,
+                    label: "CHANGELOG.md", preview: "CHANGELOG.md",
+                    status: .done, startedAtMs: ms(86_300), durationMs: 500)
+        ]
+    )
+
+    static let runs: [LinkTask] = [
+        waitingRun, activeRun, failingRun, macOnlyRun, blindRun,
+        lockedRun, brokenBackendRun, finishedRun, restoredRun,
+    ]
 
     // MARK: Details
 
@@ -184,12 +266,19 @@ enum RunProgressFixtures {
         case failingRun.runId:  return failing
         case finishedRun.runId: return finished
         case blindRun.runId:    return blind
+        case lockedRun.runId:   return locked
+        case brokenBackendRun.runId: return brokenBackend
+        case restoredRun.runId: return restored
         default:                return nil
         }
     }
 
     static func result(for runId: String) -> String? {
-        runId == finishedRun.runId ? resultText : nil
+        switch runId {
+        case finishedRun.runId, restoredRun.runId: return resultText
+        // A failed run has no result. The failure card is the answer.
+        default: return nil
+        }
     }
 
     // MARK: Text

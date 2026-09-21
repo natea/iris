@@ -349,10 +349,41 @@ public enum LinkError: Error, Equatable {
     case resultUnavailable
     /// 409 `approval_not_pending` — the desktop or a timeout already resolved it.
     case approvalNotPending
-    /// 502 `agent_unreachable` — the Mac is up, Hermes is not.
+    /// 502 `agent_unreachable` / `gateway_unreachable` — the Mac is up,
+    /// Hermes is not. This is the ONLY case that may say "Hermes is not
+    /// reachable"; §15.1 exists because everything else used to say it too.
     case agentUnreachable(String)
     /// 502 `dispatch_failed` — Hermes refused or returned no run id.
     case dispatchFailed(String)
+
+    // ----- Classified Hermes failures (LINK_API.md §15.1) -----
+    //
+    // Each carries the DESKTOP'S OWN sentence. The phone shows that, not a
+    // sentence of its own invention, so the two ends can never disagree about
+    // what happened. An empty string falls back to a plain sentence here.
+
+    /// 409 `session_in_use` — Hermes is healthy and something else holds this
+    /// chat. Recoverable with one tap (§15.3).
+    case sessionInUse(String)
+    /// 502 `backend_start_failed` — `hermes serve` would not come up.
+    case backendStartFailed(String)
+    /// 502 `model_unreachable` — Hermes is up, its model service is not.
+    case modelUnreachable(String)
+    /// 502 `auth_failed` — the shared key between Iris and Hermes is wrong.
+    case authFailed(String)
+    /// 409 `run_limit` — Hermes hit its iteration budget.
+    case runLimit(String)
+    /// 409 `not_a_live_run` — a restored run was asked to do something only a
+    /// live run can do (§16.3).
+    case notALiveRun(String)
+    /// 409 `retry_not_allowed` — the new-chat retry guard refused (§15.3).
+    case retryNotAllowed(String)
+    /// 429 — the Mac is rate limiting this route.
+    case rateLimited
+    /// A classified failure this build does not recognise, with the Mac's own
+    /// sentence kept verbatim. A newer desktop must never be able to make a
+    /// reason disappear from an older phone.
+    case hermesFailure(code: String, message: String)
     /// 400 `task_required` / `task_too_long` / `invalid_urgency` / `invalid_decision`.
     case invalidRequest(String)
 
@@ -403,10 +434,39 @@ public enum LinkError: Error, Equatable {
         case .approvalNotPending:
             return "Hermes has no pending approval for that run — it was already answered on the Mac, or it timed out."
         case .agentUnreachable(let detail):
-            return "Your Mac is reachable but Hermes is not responding on it."
-                + (detail.isEmpty ? "" : " (\(detail))")
+            // The desktop's own sentence when it sent one — it is written for
+            // a person and says more than this fallback can.
+            return detail.isEmpty
+                ? "Your Mac is reachable but Hermes is not responding on it."
+                : detail
         case .dispatchFailed(let detail):
             return "Hermes refused the task." + (detail.isEmpty ? "" : " (\(detail))")
+        case .sessionInUse(let detail):
+            return detail.isEmpty
+                ? "That Hermes chat is open somewhere else. Close it there, or start a new chat."
+                : detail
+        case .backendStartFailed(let detail):
+            return detail.isEmpty ? "Hermes' backend would not start on your Mac." : detail
+        case .modelUnreachable(let detail):
+            return detail.isEmpty
+                ? "Hermes couldn't reach its AI model service, so nothing ran."
+                : detail
+        case .authFailed(let detail):
+            return detail.isEmpty
+                ? "Iris isn't allowed into Hermes — the shared API key doesn't match."
+                : detail
+        case .runLimit(let detail):
+            return detail.isEmpty ? "Hermes hit its step limit before finishing." : detail
+        case .notALiveRun(let detail):
+            return detail.isEmpty
+                ? "That run is history — it finished in an earlier chat and is read-only."
+                : detail
+        case .retryNotAllowed(let detail):
+            return detail.isEmpty ? "That run cannot be retried." : detail
+        case .rateLimited:
+            return "That was asked for too many times in a row. Give it a minute."
+        case .hermesFailure(_, let detail):
+            return detail
         case .invalidRequest(let code):
             return "Iris on your Mac refused the request (\(code))."
         case .server(let status, let code):
@@ -421,6 +481,30 @@ public enum LinkError: Error, Equatable {
     public var clearsPairing: Bool {
         if case .notPaired = self { return true }
         return false
+    }
+
+    /// The classified failure behind this error, when there is one — so a
+    /// dispatch that failed at the Mac can offer the same recovery the run
+    /// detail screen would (§15.3).
+    public var failure: LinkFailure? {
+        switch self {
+        case .sessionInUse(let detail):
+            return LinkFailure(code: .sessionInUse, message: message, recovery: .startNewChat, detail: detail)
+        case .backendStartFailed(let detail):
+            return LinkFailure(code: .backendStartFailed, message: message, recovery: .checkMac, detail: detail)
+        case .modelUnreachable(let detail):
+            return LinkFailure(code: .modelUnreachable, message: message, recovery: .retry, detail: detail)
+        case .authFailed(let detail):
+            return LinkFailure(code: .authFailed, message: message, recovery: .checkMac, detail: detail)
+        case .runLimit(let detail):
+            return LinkFailure(code: .runLimit, message: message, recovery: .retry, detail: detail)
+        case .agentUnreachable(let detail):
+            return LinkFailure(code: .gatewayUnreachable, message: message, recovery: .checkMac, detail: detail)
+        case .hermesFailure(let code, let detail):
+            return LinkFailure(code: .unknown, message: detail, recovery: .none, detail: "", rawCode: code)
+        default:
+            return nil
+        }
     }
 }
 
@@ -667,13 +751,37 @@ public struct LinkClient: Sendable {
             case "task_not_finished": throw LinkError.taskNotFinished
             case "result_unavailable": throw LinkError.resultUnavailable
             case "approval_not_pending": throw LinkError.approvalNotPending
-            case "agent_unreachable": throw LinkError.agentUnreachable(detail)
+            // `gateway_unreachable` is the classified name for the one thing
+            // `agent_unreachable` always claimed to be, so the two meet here.
+            case "agent_unreachable", "gateway_unreachable":
+                throw LinkError.agentUnreachable(detail)
             case "dispatch_failed": throw LinkError.dispatchFailed(detail)
+            case "session_in_use": throw LinkError.sessionInUse(detail)
+            case "backend_start_failed": throw LinkError.backendStartFailed(detail)
+            case "model_unreachable": throw LinkError.modelUnreachable(detail)
+            case "auth_failed": throw LinkError.authFailed(detail)
+            case "run_limit": throw LinkError.runLimit(detail)
+            // `stopped_by_user` and `unknown` deliberately fall through to
+            // `.server`, which keeps the code verbatim: neither is a failure
+            // this app has a different behaviour for, and inventing a case for
+            // them would only hide the real code from a bug report.
+            case "not_a_live_run": throw LinkError.notALiveRun(detail)
+            case "retry_not_allowed": throw LinkError.retryNotAllowed(detail)
+            case "rate_limited": throw LinkError.rateLimited
             case "task_required", "task_too_long", "invalid_urgency", "invalid_decision",
                  "invalid_token", "invalid_environment",
                  "invalid_json", "payload_too_large", "unsupported_media_type":
                 throw LinkError.invalidRequest(code)
             default:
+                // A code this build has never heard of, but the Mac wrote a
+                // sentence for it. Keep the sentence AND the code: never drop
+                // the original on the floor (§15.1).
+                if !detail.isEmpty {
+                    throw LinkError.hermesFailure(
+                        code: code.isEmpty ? "unknown" : code,
+                        message: detail
+                    )
+                }
                 throw LinkError.server(status: http.statusCode, code: code.isEmpty ? "unknown" : code)
             }
         }

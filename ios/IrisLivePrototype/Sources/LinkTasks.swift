@@ -57,6 +57,138 @@ public struct PendingApproval: Sendable, Equatable, Hashable {
     }
 }
 
+// MARK: - Why a run failed (LINK_API.md §15)
+
+/// The desktop's stable failure vocabulary. Decoded tolerantly: a code this
+/// build has never heard of becomes `.unknown` and keeps the desktop's own
+/// `message` and `detail`, because a newer Mac must never be able to make a
+/// reason disappear from an older phone.
+public enum HermesFailureCode: String, Sendable, Equatable, CaseIterable {
+    case sessionInUse = "session_in_use"
+    case backendStartFailed = "backend_start_failed"
+    case modelUnreachable = "model_unreachable"
+    case authFailed = "auth_failed"
+    case gatewayUnreachable = "gateway_unreachable"
+    case runLimit = "run_limit"
+    case stoppedByUser = "stopped_by_user"
+    case unknown
+
+    public init(tolerant raw: String?) {
+        self = HermesFailureCode(rawValue: (raw ?? "").lowercased()) ?? .unknown
+    }
+
+    /// The ONLY code that may be described as "Hermes is not reachable".
+    /// §15.1 is explicit: saying it for anything else is the bug this whole
+    /// feature exists to fix.
+    public var meansHermesUnreachable: Bool {
+        self == .gatewayUnreachable
+    }
+}
+
+/// What would fix it. A machine hint, never shown as-is.
+public enum HermesRecovery: String, Sendable, Equatable, CaseIterable {
+    case startNewChat = "start_new_chat"
+    case retry
+    case checkMac = "check_mac"
+    case none
+
+    public init(tolerant raw: String?) {
+        self = HermesRecovery(rawValue: (raw ?? "").lowercased()) ?? .none
+    }
+}
+
+/// `failure` on a failed run (§15.2), or nil on every other run.
+public struct LinkFailure: Sendable, Equatable, Hashable {
+    public let code: HermesFailureCode
+    /// The desktop's own plain sentence. Untrusted text: display and speak,
+    /// never execute. Already redacted and length-capped on the Mac.
+    public let message: String
+    public let recovery: HermesRecovery
+    /// Hermes' own first line, for a debugging disclosure. Never the headline.
+    public let detail: String
+    /// The code exactly as the desktop sent it, even when this build does not
+    /// know it — so a bug report can quote the real thing.
+    public let rawCode: String
+
+    public init(
+        code: HermesFailureCode, message: String,
+        recovery: HermesRecovery, detail: String = "", rawCode: String? = nil
+    ) {
+        self.code = code
+        self.message = message
+        self.recovery = recovery
+        self.detail = detail
+        self.rawCode = rawCode ?? code.rawValue
+    }
+
+    /// Tolerant: a block with neither a message nor a detail carries no
+    /// information and is dropped rather than shown as a blank failure card.
+    public init?(json: Any?) {
+        guard let object = json as? [String: Any] else { return nil }
+        let rawCode = ((object["code"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+        let message = ((object["message"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = ((object["detail"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty || !detail.isEmpty else { return nil }
+        self.code = HermesFailureCode(tolerant: rawCode)
+        self.recovery = HermesRecovery(tolerant: object["recovery"] as? String)
+        self.detail = detail
+        self.rawCode = rawCode.isEmpty ? self.code.rawValue : rawCode
+        // A code we do not recognise still gets a sentence: the desktop's if
+        // it sent one, otherwise the generic fallback — with `detail` kept.
+        self.message = message.isEmpty
+            ? "Hermes couldn't run that, and this app doesn't recognise the reason."
+            : message
+    }
+
+    /// What the card's button offers, or nil when there is nothing to offer.
+    public var actionTitle: String? {
+        switch recovery {
+        case .startNewChat: return "Start a new chat and try again"
+        case .retry: return "Try again"
+        case .checkMac, .none: return nil
+        }
+    }
+}
+
+/// `POST /link/sessions/new` (§15.3).
+public struct LinkNewChat: Sendable, Equatable {
+    public let sessionId: String
+    public let title: String
+    /// The re-dispatched run, when `retryRunId` was given and allowed.
+    public let runId: String?
+    /// Set when the chat was created but the retry did not start. The chat
+    /// really was made: say so, and do not claim the work restarted.
+    public let retryError: String
+    public let retryMessage: String
+
+    public init(
+        sessionId: String, title: String = "", runId: String? = nil,
+        retryError: String = "", retryMessage: String = ""
+    ) {
+        self.sessionId = sessionId
+        self.title = title
+        self.runId = runId
+        self.retryError = retryError
+        self.retryMessage = retryMessage
+    }
+
+    public var didRetry: Bool { !(runId ?? "").isEmpty }
+}
+
+/// `GET /link/tasks[?scope=all]` (§16.4).
+public struct LinkTaskList: Sendable, Equatable {
+    public let tasks: [LinkTask]
+    /// Runs from chats that are no longer pinned. Read-only, and never news.
+    public let earlier: [LinkTask]
+
+    public init(tasks: [LinkTask], earlier: [LinkTask] = []) {
+        self.tasks = tasks
+        self.earlier = earlier
+    }
+}
+
 /// The four answers `POST /link/tasks/:id/approval` accepts (§4).
 public enum ApprovalDecision: String, Sendable, CaseIterable {
     case once
@@ -96,6 +228,14 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
     public let stepCount: Int
     /// §11.5 — what this run is waiting on, or nil.
     public let pendingApproval: PendingApproval?
+    /// §15.2 — why it failed, or nil on every run that did not fail.
+    public let failure: LinkFailure?
+    /// §16.2 — rebuilt from the Hermes transcript rather than dispatched here.
+    public let restored: Bool
+    /// §16.3 — nothing on this run can be stopped, approved, or retried.
+    public let readOnly: Bool
+    /// Which Hermes chat it belongs to, so earlier chats can be grouped.
+    public let sessionId: String
 
     public var id: String { runId }
 
@@ -103,7 +243,9 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
         runId: String, task: String, status: String, origin: String,
         createdAt: Double = 0, updatedAt: Double = 0, announcedAt: Double = 0,
         headline: String = "", stepCount: Int = 0,
-        pendingApproval: PendingApproval? = nil
+        pendingApproval: PendingApproval? = nil,
+        failure: LinkFailure? = nil,
+        restored: Bool = false, readOnly: Bool = false, sessionId: String = ""
     ) {
         self.runId = runId
         self.task = task
@@ -115,6 +257,10 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
         self.headline = headline
         self.stepCount = stepCount
         self.pendingApproval = pendingApproval
+        self.failure = failure
+        self.restored = restored
+        self.readOnly = readOnly
+        self.sessionId = sessionId
     }
 
     /// True when Hermes is waiting on the user for this run.
@@ -123,6 +269,11 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
     public var isTerminal: Bool { LinkRunStatus.isTerminal(status) }
 
     public var isFromThisPhone: Bool { origin.hasPrefix("device:") }
+
+    /// History, not news: a restored or read-only run must never trigger a
+    /// completion announcement, a local notification, the active-runs strip,
+    /// or a Live Activity (§16.3).
+    public var isHistory: Bool { restored || readOnly || origin == "history" }
 
     public init?(json: [String: Any]) {
         guard let runId = json["run_id"] as? String, !runId.isEmpty else { return nil }
@@ -136,6 +287,10 @@ public struct LinkTask: Sendable, Equatable, Hashable, Identifiable {
         self.headline = (json["headline"] as? String) ?? ""
         self.stepCount = LinkTask.integer(json["step_count"]) ?? 0
         self.pendingApproval = PendingApproval(json: json["pending_approval"])
+        self.failure = LinkFailure(json: json["failure"])
+        self.restored = (json["restored"] as? Bool) ?? false
+        self.readOnly = (json["read_only"] as? Bool) ?? false
+        self.sessionId = (json["session_id"] as? String) ?? ""
     }
 
     static func number(_ value: Any?) -> Double {
@@ -182,11 +337,17 @@ public struct LinkTaskStatus: Sendable, Equatable {
     public let error: String?
     /// §11.5 — what this run is waiting on, or nil.
     public let pendingApproval: PendingApproval?
+    /// §15.2 — why it failed, or nil.
+    public let failure: LinkFailure?
+    /// §16.2 / §16.3.
+    public let restored: Bool
+    public let readOnly: Bool
 
     public init(
         runId: String, task: String = "", origin: String = "",
         status: String, instructions: String = "", output: String? = nil, error: String? = nil,
-        pendingApproval: PendingApproval? = nil
+        pendingApproval: PendingApproval? = nil,
+        failure: LinkFailure? = nil, restored: Bool = false, readOnly: Bool = false
     ) {
         self.runId = runId
         self.task = task
@@ -196,9 +357,29 @@ public struct LinkTaskStatus: Sendable, Equatable {
         self.output = output
         self.error = error
         self.pendingApproval = pendingApproval
+        self.failure = failure
+        self.restored = restored
+        self.readOnly = readOnly
     }
 
     public var isTerminal: Bool { LinkRunStatus.isTerminal(status) }
+
+    public var isHistory: Bool { restored || readOnly || origin == "history" }
+
+    /// The one decoder both status routes use, so they cannot drift.
+    init(json: [String: Any], runId fallbackId: String) {
+        self.runId = (json["run_id"] as? String) ?? fallbackId
+        self.task = (json["task"] as? String) ?? ""
+        self.origin = (json["origin"] as? String) ?? ""
+        self.status = (json["status"] as? String) ?? ""
+        self.instructions = (json["instructions"] as? String) ?? ""
+        self.output = json["output"] as? String
+        self.error = json["error"] as? String
+        self.pendingApproval = PendingApproval(json: json["pending_approval"])
+        self.failure = LinkFailure(json: json["failure"])
+        self.restored = (json["restored"] as? Bool) ?? false
+        self.readOnly = (json["read_only"] as? Bool) ?? false
+    }
 }
 
 /// `GET /link/tasks/:id/result` — the complete stored output.
@@ -208,13 +389,20 @@ public struct LinkTaskResult: Sendable, Equatable {
     public let status: String
     public let output: String
     public let instructions: String
+    /// §15.2 — a failed run's result screen leads with WHY, not with an empty
+    /// "Result" section.
+    public let failure: LinkFailure?
 
-    public init(runId: String, task: String, status: String, output: String, instructions: String) {
+    public init(
+        runId: String, task: String, status: String, output: String,
+        instructions: String, failure: LinkFailure? = nil
+    ) {
         self.runId = runId
         self.task = task
         self.status = status
         self.output = output
         self.instructions = instructions
+        self.failure = failure
     }
 }
 
@@ -257,6 +445,26 @@ public protocol LinkTaskService: Sendable {
     func registerLiveActivityToken(activityId: String, token: String, environment: PushEnvironment) async throws -> Bool
     /// `DELETE /link/live-activity[?activity_id=…]`. Nil clears them all.
     func unregisterLiveActivity(activityId: String?) async throws
+
+    // ----- Failure recovery and history (LINK_API.md §15.3 / §16.4) -----
+    //
+    // REQUIREMENTS, for the third time and the same reason: callers hold this
+    // protocol as an existential, so a method declared only in an extension is
+    // dispatched statically to that extension's default and `LinkClient`'s
+    // real implementation never runs. The defaults below exist only so older
+    // doubles still compile, and they refuse loudly rather than quietly.
+
+    /// `POST /link/sessions/new` — start a fresh Hermes chat and pin it,
+    /// optionally re-dispatching one failed run's exact brief.
+    ///
+    /// There is NO tool for this and there never will be: the model must not
+    /// be able to repin the user's Hermes chat. Its only caller is a
+    /// deliberate, confirmed tap on the run-detail failure card.
+    func startNewChat(retryRunId: String?) async throws -> LinkNewChat
+
+    /// `GET /link/tasks?scope=all` — the pinned chat's runs plus the runs from
+    /// chats that are no longer pinned.
+    func listAllTasks() async throws -> LinkTaskList
 }
 
 // MARK: - LinkClient conformance
@@ -292,18 +500,39 @@ extension LinkClient: LinkTaskService {
         return raw.compactMap(LinkTask.init(json:))
     }
 
+    /// `GET /link/tasks?scope=all` (§16.4).
+    public func listAllTasks() async throws -> LinkTaskList {
+        let json = try await request(path: "/link/tasks?scope=all", method: "GET", body: nil)
+        return LinkTaskList(
+            tasks: ((json["tasks"] as? [[String: Any]]) ?? []).compactMap(LinkTask.init(json:)),
+            // Absent means the Mac is older than §16.4, not that there are
+            // none. The UI says "not available" rather than "no earlier chats".
+            earlier: ((json["earlier"] as? [[String: Any]]) ?? []).compactMap(LinkTask.init(json:))
+        )
+    }
+
+    /// `POST /link/sessions/new` (§15.3). Its only caller is the confirmed
+    /// recovery tap; there is no tool that reaches this.
+    public func startNewChat(retryRunId: String?) async throws -> LinkNewChat {
+        var body: [String: Any] = [:]
+        if let retryRunId, !retryRunId.isEmpty { body["retry_run_id"] = retryRunId }
+        let json = try await request(path: "/link/sessions/new", method: "POST", body: body)
+        guard let sessionId = json["session_id"] as? String, !sessionId.isEmpty else {
+            throw LinkError.badResponse("the Mac started no new chat")
+        }
+        let runId = (json["run_id"] as? String) ?? ""
+        return LinkNewChat(
+            sessionId: sessionId,
+            title: (json["title"] as? String) ?? "",
+            runId: runId.isEmpty ? nil : runId,
+            retryError: (json["retry_error"] as? String) ?? "",
+            retryMessage: (json["retry_message"] as? String) ?? ""
+        )
+    }
+
     public func taskStatus(runId: String) async throws -> LinkTaskStatus {
         let json = try await request(path: "/link/tasks/\(Self.segment(runId))", method: "GET", body: nil)
-        return LinkTaskStatus(
-            runId: (json["run_id"] as? String) ?? runId,
-            task: (json["task"] as? String) ?? "",
-            origin: (json["origin"] as? String) ?? "",
-            status: (json["status"] as? String) ?? "",
-            instructions: (json["instructions"] as? String) ?? "",
-            output: json["output"] as? String,
-            error: json["error"] as? String,
-            pendingApproval: PendingApproval(json: json["pending_approval"])
-        )
+        return LinkTaskStatus(json: json, runId: runId)
     }
 
     public func taskResult(runId: String) async throws -> LinkTaskResult {
@@ -320,7 +549,8 @@ extension LinkClient: LinkTaskService {
             task: (json["task"] as? String) ?? "",
             status: (json["status"] as? String) ?? "",
             output: (json["output"] as? String) ?? "",
-            instructions: (json["instructions"] as? String) ?? ""
+            instructions: (json["instructions"] as? String) ?? "",
+            failure: LinkFailure(json: json["failure"])
         )
     }
 
@@ -509,16 +739,7 @@ public struct LinkTaskDetail: Sendable, Equatable {
     }
 
     public init(json: [String: Any], runId: String, isDelta: Bool) {
-        self.task = LinkTaskStatus(
-            runId: (json["run_id"] as? String) ?? runId,
-            task: (json["task"] as? String) ?? "",
-            origin: (json["origin"] as? String) ?? "",
-            status: (json["status"] as? String) ?? "",
-            instructions: (json["instructions"] as? String) ?? "",
-            output: json["output"] as? String,
-            error: json["error"] as? String,
-            pendingApproval: PendingApproval(json: json["pending_approval"])
-        )
+        self.task = LinkTaskStatus(json: json, runId: runId)
         self.headline = (json["headline"] as? String) ?? ""
         self.stepCount = LinkTask.integer(json["step_count"]) ?? 0
         self.stepsCursor = LinkTask.integer(json["steps_cursor"]) ?? 0
@@ -547,6 +768,19 @@ public extension LinkTaskService {
     /// desktops): a status with no steps and nothing claimed about them.
     func taskStatus(runId: String, stepsSince: Int?) async throws -> LinkTaskDetail {
         LinkTaskDetail(task: try await taskStatus(runId: runId))
+    }
+
+    /// Refuses rather than pretending. A service that cannot start a new chat
+    /// must not answer as though it had.
+    func startNewChat(retryRunId: String?) async throws -> LinkNewChat {
+        throw LinkError.tasksUnavailable
+    }
+
+    /// An older desktop has no `scope=all`; the pinned chat's list is all
+    /// there is, and claiming an empty "Earlier chats" would be a lie only if
+    /// we pretended it had been asked for. It has not: `earlier` is empty.
+    func listAllTasks() async throws -> LinkTaskList {
+        LinkTaskList(tasks: try await listTasks(undelivered: false))
     }
 }
 

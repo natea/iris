@@ -255,3 +255,34 @@ test("pending approvals are derived from real run state only", () => {
   assert.equal(secret.can_approve_from_phone, false);
   assert.equal(secret.summary.includes("sudo password for nate"), false, "a secret prompt is never echoed");
 });
+
+test("a failed run's push says why, and carries no result text or secret", () => {
+  const payload = buildCompletionPayload({
+    runId: "run-9",
+    task: "Summarise yesterday's commits",
+    status: "failed",
+    failure: {
+      code: "session_in_use",
+      message: "That chat is open in Hermes Desktop. Close it there, or I can start a new chat.",
+      recovery: "start_new_chat",
+      detail: "This chat is open in another Hermes window/terminal.",
+    },
+  });
+  assert.equal(payload.aps.alert.title, "Hermes couldn't finish");
+  // The reason, not the task title: a title tells the user nothing to act on.
+  assert.equal(
+    payload.aps.alert.body,
+    "That chat is open in Hermes Desktop. Close it there, or I can start a new chat.",
+  );
+  assert.equal(payload.failure_code, "session_in_use");
+  assert.equal(payload.recovery, "start_new_chat");
+  // `detail` is for a debugging disclosure on the phone, never a lock screen.
+  assert.doesNotMatch(JSON.stringify(payload), /window\/terminal/);
+});
+
+test("a completion with no failure is unchanged", () => {
+  const payload = buildCompletionPayload({ runId: "run-1", task: "Tidy the inbox", status: "completed" });
+  assert.equal(payload.aps.alert.body, "Tidy the inbox");
+  assert.equal(payload.failure_code, undefined);
+  assert.equal(payload.recovery, undefined);
+});

@@ -29,13 +29,23 @@ export function shortenForPush(text, max = MAX_BODY_CHARS) {
   return `${cleaned.slice(0, max - 1).trimEnd()}…`;
 }
 
-export function buildCompletionPayload({ runId, task, status }) {
+/**
+ * @param failure  The classified `{ code, message, recovery }` for a failed
+ *                 run, or null. Its `message` is one plain sentence built by
+ *                 hermesFailure.mjs: it carries no result text and no secret,
+ *                 which is why it is allowed on a lock screen when the raw
+ *                 error never would be.
+ */
+export function buildCompletionPayload({ runId, task, status, failure = null }) {
+  const reason = failure?.message ? shortenForPush(failure.message) : "";
   return {
     aps: {
       alert: {
         title: completionTitle(status),
-        // The task title only. No output, no error text, no result.
-        body: shortenForPush(task) || "A task you sent from this phone.",
+        // A failed run leads with WHY. "Hermes couldn't finish" over a task
+        // title tells the user nothing they can act on; the reason does.
+        // Otherwise the task title only — no output, no error text, no result.
+        body: reason || shortenForPush(task) || "A task you sent from this phone.",
       },
       sound: "default",
       "thread-id": String(runId),
@@ -43,6 +53,10 @@ export function buildCompletionPayload({ runId, task, status }) {
     },
     run_id: String(runId),
     kind: "run_complete",
+    // So the phone can open straight onto the failure card with the right
+    // recovery offered, without a round trip first.
+    ...(failure?.code ? { failure_code: String(failure.code) } : {}),
+    ...(failure?.recovery ? { recovery: String(failure.recovery) } : {}),
   };
 }
 
@@ -138,7 +152,7 @@ export function createPushNotifier({
      * phone is in a live session it announces the result itself and acks with
      * POST /link/tasks/:id/announced, which wins the race and cancels this.
      */
-    notifyRunTerminal({ runId, task, status, origin }) {
+    notifyRunTerminal({ runId, task, status, origin, failure = null }) {
       const deviceId = deviceIdFromOrigin(origin);
       if (!runId || !deviceId) return Promise.resolve({ skipped: "not_device_origin" });
       const existing = pendingCompletions.get(runId);
@@ -152,7 +166,7 @@ export function createPushNotifier({
           }
           deliver({
             deviceId,
-            payload: buildCompletionPayload({ runId, task, status }),
+            payload: buildCompletionPayload({ runId, task, status, failure }),
             collapseId: String(runId).slice(0, 64),
             priority: 10,
           }).then(resolve, () => resolve({ skipped: "error" }));

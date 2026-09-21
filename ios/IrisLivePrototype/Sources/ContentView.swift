@@ -201,6 +201,41 @@ final class LiveSessionController: ObservableObject {
     /// Why the last tapped Yes sent nothing, in plain words. Cleared as soon
     /// as another answer is attempted or a new proposal is staged.
     @Published var proposalError = ""
+    /// Set when the dispatch that just failed is one a tap could recover
+    /// from. Cleared with `proposalError`. The model cannot set this.
+    @Published var proposalRecovery: LinkFailure?
+    /// True while the recovery route is in flight, for the button's progress.
+    @Published private(set) var isRecoveringChat = false
+
+    /// SECURITY INVARIANT: the ONLY caller is the proposal card's recovery
+    /// button closure. There is no tool for this and no system event reaches
+    /// it — the model must not be able to repin the user's Hermes chat.
+    /// Exactly-once lives in `NewChatRecoveryController`, so a double tap
+    /// starts one chat.
+    func startNewChatFromProposal() {
+        guard !isRecoveringChat else { return }
+        let paired = pairedDesktop ?? KeychainStore.loadPairing()
+        let service: LinkTaskService? = paired.map { LinkClient(paired: $0) }
+        let controller = chatRecovery ?? NewChatRecoveryController(service: service)
+        chatRecovery = controller
+        isRecoveringChat = true
+        Task { @MainActor [weak self] in
+            // No `retry_run_id`: nothing was dispatched, so there is no run to
+            // retry. The brief stays staged and the user can tap Yes again.
+            let outcome = await controller.start(retryRunId: nil)
+            guard let self else { return }
+            self.isRecoveringChat = false
+            switch outcome {
+            case .retried, .startedOnly:
+                self.proposalRecovery = nil
+                self.proposalError = "Started a new Hermes chat. Tap Yes to send that task again."
+            case .failed(let message):
+                self.proposalError = message
+            }
+        }
+    }
+
+    private var chatRecovery: NewChatRecoveryController?
     /// Runs in the pinned Hermes session, desktop-dispatched ones included.
     @Published var runs: [LinkTask] = []
     /// Tool / system-event lines, newest last. Collapsible in the UI.
@@ -516,6 +551,7 @@ final class LiveSessionController: ObservableObject {
         pendingProposal = nil
         isAnsweringProposal = false
         proposalError = ""
+        proposalRecovery = nil
         toolLog = []
         announcingRunId = nil
         lastTransportError = ""
@@ -736,7 +772,7 @@ final class LiveSessionController: ObservableObject {
         case .pendingProposal(let staged):
             // A different brief on the card is a different question, so a
             // failure message about the old one must not survive onto it.
-            if staged?.id != pendingProposal?.id { proposalError = "" }
+            if staged?.id != pendingProposal?.id { proposalError = ""; proposalRecovery = nil }
             pendingProposal = staged
         case .runs(let list):
             runs = list
@@ -770,10 +806,12 @@ final class LiveSessionController: ObservableObject {
         guard !isAnsweringProposal, let staged = pendingProposal else { return }
         guard let coordinator else {
             proposalError = "There is no live session to answer in. Nothing was sent."
+            proposalRecovery = nil
             Haptics.error()
             return
         }
         proposalError = ""
+        proposalRecovery = nil
         // Barge-in: stop the read-back the moment the answer is given. The
         // injected turn is what tells the server to stop generating; this is
         // what stops the audio already buffered on the phone.
@@ -795,9 +833,14 @@ final class LiveSessionController: ObservableObject {
                 Haptics.tap()
             case .stale:
                 self.proposalError = "That was a different request from the one staged now. Nothing was sent."
+                self.proposalRecovery = nil
                 Haptics.error()
-            case .failed(let message):
+            case .failed(let message, let recovery):
                 self.proposalError = message
+                // Only a locked chat puts a button on this card; everything
+                // else is advice, and a button that cannot help is worse than
+                // none.
+                self.proposalRecovery = recovery
                 Haptics.error()
             }
         }

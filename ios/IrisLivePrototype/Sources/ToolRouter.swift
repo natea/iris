@@ -167,8 +167,47 @@ public enum SystemEvent {
         status: String,
         output: String,
         userName: String,
-        wakingFromSleep: Bool = false
+        wakingFromSleep: Bool = false,
+        // LINK_API.md §15.4. When a run FAILED and the Mac classified why,
+        // this replaces the "summarize the result" block outright: there is no
+        // result, and Iris must not invent one — nor repeat "Hermes is not
+        // reachable" for a Hermes that is running and simply refused.
+        failure: LinkFailure? = nil
     ) -> String {
+        if let failure, !failure.message.isEmpty {
+            var lines = [
+                "SYSTEM_EVENT_HERMES_COMPLETE",
+                "run_id: \(runId)",
+                "status: \(status)",
+                "failure_code: \(failure.rawCode)",
+                "recovery: \(failure.recovery.rawValue)",
+                "instructions_to_iris:",
+                "- The task did NOT run. Tell \(userName) that, in one short sentence, and give the reason below in plain words.",
+                "- Say the reason as written. Do not restate it as a network problem, and do not say Hermes is unreachable unless the reason says so.",
+                "- You have NO result. Do not summarize, predict, or invent one.",
+            ]
+            switch failure.recovery {
+            case .startNewChat:
+                lines.append(
+                    "- Offer the fix out loud, then stop: tell \(userName) they can tap \"Start a new chat and try again\" on the run in the Iris app."
+                )
+                lines.append(
+                    "- You CANNOT start a new chat yourself and there is no tool for it. If they ask you to, say it has to be the button — it changes which chat the Mac uses too."
+                )
+            case .retry:
+                lines.append("- If they want it done, ask them to say so and you will stage the task again.")
+            case .checkMac:
+                lines.append("- Say it needs attention on the Mac. Do not promise to fix it yourself.")
+            case .none:
+                break
+            }
+            if wakingFromSleep {
+                lines.append("- Iris was woken for this. Deliver it directly without a greeting.")
+            }
+            lines.append("failure_reason:")
+            lines.append(failure.message)
+            return lines.joined(separator: "\n")
+        }
         var lines = [
             "SYSTEM_EVENT_HERMES_COMPLETE",
             "run_id: \(runId)",
@@ -526,6 +565,16 @@ public actor ToolRouter {
     static func dispatchErrorCode(_ error: Error) -> String {
         switch error as? LinkError {
         case .agentUnreachable: return "agent_unreachable"
+        // The classified vocabulary, so the model repeats the real cause
+        // rather than the old catch-all (LINK_API.md §15.1).
+        case .sessionInUse(let detail): return detail.isEmpty ? "session_in_use" : "session_in_use: \(detail)"
+        case .backendStartFailed(let detail):
+            return detail.isEmpty ? "backend_start_failed" : "backend_start_failed: \(detail)"
+        case .modelUnreachable(let detail):
+            return detail.isEmpty ? "model_unreachable" : "model_unreachable: \(detail)"
+        case .authFailed(let detail): return detail.isEmpty ? "auth_failed" : "auth_failed: \(detail)"
+        case .runLimit(let detail): return detail.isEmpty ? "run_limit" : "run_limit: \(detail)"
+        case .hermesFailure(let code, let detail): return "\(code): \(detail)"
         case .dispatchFailed(let detail):
             return detail.isEmpty ? "dispatch_failed" : "dispatch_failed: \(detail)"
         case .tasksUnavailable: return "tasks_unavailable"
@@ -566,8 +615,10 @@ public actor ToolRouter {
         /// expired, discarded, or lost to a reconnect). Nothing was sent.
         case stale
         /// The Mac refused or could not be reached. Nothing was sent and the
-        /// proposal is still staged, so the user can try again.
-        case failed(message: String)
+        /// proposal is still staged, so the user can try again. `recovery`
+        /// is set only when there is something a tap on THIS card could fix
+        /// (LINK_API.md §15.3) — today that is a locked Hermes chat.
+        case failed(message: String, recovery: LinkFailure?)
     }
 
     /// The Yes button. Dispatches EXACTLY the staged brief, once.
@@ -593,7 +644,10 @@ public actor ToolRouter {
             // Nothing reached Hermes, so the card goes back up exactly as it
             // was rather than the brief being silently lost.
             gate.restoreAfterUserControlDispatchFailed(claimed)
-            return .failed(message: Self.userFacingDispatchFailure(error))
+            return .failed(
+                message: Self.userFacingDispatchFailure(error),
+                recovery: Self.dispatchRecovery(error)
+            )
         }
     }
 
@@ -614,6 +668,11 @@ public actor ToolRouter {
 
     /// The same failures as `dispatchErrorCode`, in the words the card shows
     /// the user. Every one of them ends by saying nothing was sent.
+    ///
+    /// The generic "Hermes is not reachable from your Mac" sentence is now
+    /// reserved for the one error that actually means it. Everything the Mac
+    /// classified arrives with its OWN sentence, and that is what is shown —
+    /// the phone does not rewrite the Mac's explanation.
     static func userFacingDispatchFailure(_ error: Error) -> String {
         switch error as? LinkError {
         case .notPaired:
@@ -624,9 +683,21 @@ public actor ToolRouter {
             return "Hermes is not reachable from your Mac. Nothing was sent."
         case .tasksUnavailable:
             return "The version of Iris on your Mac cannot take tasks from the phone. Nothing was sent."
+        case .sessionInUse(_), .backendStartFailed(_), .modelUnreachable(_),
+             .authFailed(_), .runLimit(_), .hermesFailure(_, _):
+            guard let link = error as? LinkError else { return "That could not be sent to Hermes. Nothing was sent." }
+            return "\(link.message) Nothing was sent."
         default:
             return "That could not be sent to Hermes. Nothing was sent."
         }
+    }
+
+    /// The recovery the proposal card may offer after a dispatch failed at the
+    /// Mac, or nil. Only `start_new_chat` puts a button on that card; the
+    /// others are advice, not actions this app can take.
+    static func dispatchRecovery(_ error: Error) -> LinkFailure? {
+        guard let failure = (error as? LinkError)?.failure else { return nil }
+        return failure.recovery == .startNewChat ? failure : nil
     }
 
     // MARK: 5.4 discard_hermes_proposal

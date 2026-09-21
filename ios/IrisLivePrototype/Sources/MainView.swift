@@ -69,7 +69,13 @@ struct MainView: View {
                         .accessibilityHidden(true)   // the orb already says this
 
                     if let proposal = pendingProposal {
-                        PendingProposalCard(brief: proposal.task, failure: proposalError)
+                        PendingProposalCard(
+                            brief: proposal.task,
+                            failure: proposalError,
+                            recovery: proposalRecovery,
+                            onStartNewChat: proposalRecovery == nil ? nil : { session.startNewChatFromProposal() },
+                            isRecovering: session.isRecoveringChat
+                        )
                             .padding(.horizontal, 20)
                             .padding(.top, 18)
                             // The brief outranks the transcript for space:
@@ -390,6 +396,11 @@ struct MainView: View {
         fixture == nil ? session.proposalError : ""
     }
 
+    /// Never offered to a fixture: a preview has no Mac to talk to.
+    private var proposalRecovery: LinkFailure? {
+        fixture == nil ? session.proposalRecovery : nil
+    }
+
     private var transcriptLines: [LiveSessionController.TranscriptLine] {
         fixture?.lines ?? session.lines
     }
@@ -466,6 +477,14 @@ struct PendingProposalCard: View {
     let brief: String
     /// Why the last tap sent nothing. Empty when nothing has failed.
     var failure: String = ""
+    /// The classified failure when a tap could fix it (LINK_API.md §15.3).
+    /// Only `start_new_chat` ever reaches here.
+    var recovery: LinkFailure?
+    /// Raised by the recovery button ONLY. There is no tool for it: the model
+    /// cannot repin the user's Hermes chat, and this closure is the sole
+    /// route from a tap to that route.
+    var onStartNewChat: (() -> Void)?
+    var isRecovering = false
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var measuredBrief: CGFloat = 0
@@ -521,6 +540,27 @@ struct PendingProposalCard: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("proposal-failure")
+
+                if recovery?.recovery == .startNewChat, let onStartNewChat {
+                    Button(action: onStartNewChat) {
+                        HStack(spacing: 8) {
+                            if isRecovering {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "bubble.left.and.bubble.right.fill")
+                            }
+                            Text("Start a new chat and try again")
+                                .fontWeight(.semibold)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .multilineTextAlignment(.leading)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isRecovering)
+                    .accessibilityIdentifier("proposal-start-new-chat")
+                    .accessibilityHint("Starts a new Hermes chat on your Mac and sends this task again")
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
