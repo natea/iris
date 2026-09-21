@@ -580,6 +580,11 @@ public struct LinkClient: Sendable {
         // `session` is the default on the wire; sending it changes nothing, and
         // omitting it keeps an older desktop's `{}` behavior exactly.
         if purpose != .session { body["purpose"] = purpose.rawValue }
+        // The PHONE's zone, read at every mint (so it follows the user when
+        // they travel, and is right again after a reconnect). Without it the
+        // model reasons in UTC: at 9 pm Eastern on a Sunday "tomorrow" was
+        // dispatched as Tuesday. The Mac validates it before using it.
+        if purpose == .session { body["timezone"] = TimeZone.current.identifier }
         let json = try await send(path: "/link/gemini-token", method: "POST", body: body, authenticated: true)
         guard let token = json["token"] as? String, !token.isEmpty else {
             throw LinkError.badResponse("token response carried no token")

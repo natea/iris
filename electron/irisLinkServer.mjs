@@ -339,7 +339,13 @@ export function createIrisLinkServer({
       resumeHandle = handle;
     }
     try {
-      const minted = await mintGeminiToken({ voice, purpose, resumeHandle });
+      // The phone's IANA zone ("America/New_York"), so "tomorrow" means the
+      // user's tomorrow. Shape-checked here; the minter validates it for real.
+      const timeZone =
+        typeof payload.timezone === "string" && /^[A-Za-z0-9_+\-/]{1,64}$/.test(payload.timezone)
+          ? payload.timezone
+          : undefined;
+      const minted = await mintGeminiToken({ voice, purpose, resumeHandle, timeZone });
       if (minted?.error) {
         sendJson(res, 400, { error: String(minted.error) });
         return;

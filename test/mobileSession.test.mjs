@@ -246,3 +246,15 @@ test("phone sessions use low start-of-speech sensitivity so speaker echo does no
   // A preview never listens, so it carries no input configuration at all.
   assert.equal(buildMobilePreviewConfig({ voice: "Algenib" }).realtimeInputConfig, undefined);
 });
+
+test("the phone's prompt states the local date so 'tomorrow' is not computed in UTC", async () => {
+  const { buildMobileLiveConfig } = await import("../electron/mobileSession.mjs");
+  const { localTimeInstruction } = await import("../electron/localTime.mjs");
+  const localTime = localTimeInstruction({ now: new Date("2026-09-21T01:09:00Z"), timeZone: "America/New_York", userName: "Nate" });
+  const text = buildMobileLiveConfig({ userName: "Nate", voice: "Algenib", localTime }).systemInstruction.parts[0].text;
+  assert.match(text, /Tomorrow is Monday, September 21, 2026/);
+  assert.match(text, /never in UTC/);
+  // Absent, nothing is invented.
+  const bare = buildMobileLiveConfig({ userName: "Nate", voice: "Algenib" }).systemInstruction.parts[0].text;
+  assert.doesNotMatch(bare, /Date and time rule/);
+});

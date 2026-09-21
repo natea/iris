@@ -72,6 +72,7 @@ import { createPushNotifier } from "./pushNotifier.mjs";
 import { createLiveActivityNotifier } from "./liveActivityNotifier.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
 import { createRunSteps, parseStepsSince, snapshotFromHistory } from "./runSteps.mjs";
+import { localTimeInstruction, normalizeTimeZone } from "./localTime.mjs";
 import {
   GEMINI_VOICES,
   accentInstruction,
@@ -2828,6 +2829,8 @@ function buildLiveConfig(resumeHandleForSession = null) {
             "Automatic idle sleep needs no comment. When a Hermes result wakes Iris, deliver the result directly without another greeting.",
             `When SYSTEM_EVENT_HERMES_COMPLETE arrives, briefly announce the real result and ask whether ${userDisplayName()} wants to discuss it. Resume an interrupted topic only if you can name it from conversation context.`,
             "Keep voice responses natural and short.",
+            // Stated, not assumed: without it the model reasons in UTC.
+            localTimeInstruction({ userName: userDisplayName() }),
             accentInstruction(process.env.GEMINI_LIVE_ACCENT),
           ].filter(Boolean).join("\n"),
         },
@@ -4063,7 +4066,7 @@ liveActivity = createLiveActivityNotifier({
 // `purpose` selects between a real session config and a minimal preview
 // config (see buildMobilePreviewConfig in mobileSession.mjs): the two must
 // never share a token, since a preview has no tools and no personal context.
-async function mintGeminiToken({ voice: requestedVoice, purpose = "session", resumeHandle } = {}) {
+async function mintGeminiToken({ voice: requestedVoice, purpose = "session", resumeHandle, timeZone } = {}) {
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
   if (!apiKey) throw new Error("No Gemini API key is configured.");
 
@@ -4085,6 +4088,9 @@ async function mintGeminiToken({ voice: requestedVoice, purpose = "session", res
     : buildMobileLiveConfig({
         // Only a token can carry a resumption handle for a paired phone.
         resumeHandle: resumeHandle || undefined,
+        // The phone's clock, not the Mac's: they can be in different zones. The
+        // zone is validated; an unknown one falls back to this machine's.
+        localTime: localTimeInstruction({ timeZone: normalizeTimeZone(timeZone), userName: userDisplayName() }),
         userName: userDisplayName(),
         voice,
         accentInstruction: accentInstruction(process.env.GEMINI_LIVE_ACCENT),

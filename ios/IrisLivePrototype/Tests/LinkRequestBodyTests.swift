@@ -101,6 +101,27 @@ final class LinkRequestBodyTests: XCTestCase {
         ]
     }
 
+    // MARK: Time zone — "tomorrow" must mean the user's tomorrow
+
+    func testEverySessionMintCarriesThePhonesTimeZoneAndAPreviewDoesNot() async throws {
+        StubProtocol.reset(answering: .init(json: tokenReply()))
+        _ = try await client().geminiToken(voice: "Algenib")
+        var body = try XCTUnwrap(StubProtocol.lastBody)
+        XCTAssertEqual(body["timezone"] as? String, TimeZone.current.identifier)
+
+        // A reconnect mint too: the zone must not be lost across a resume.
+        StubProtocol.reset(answering: .init(json: tokenReply(resumed: true)))
+        _ = try await client().geminiToken(resumeHandle: "handle-xyz", voice: "Algenib")
+        body = try XCTUnwrap(StubProtocol.lastBody)
+        XCTAssertEqual(body["timezone"] as? String, TimeZone.current.identifier)
+
+        // A preview only speaks one fixed line; it needs no clock.
+        StubProtocol.reset(answering: .init(json: tokenReply(purpose: "preview")))
+        _ = try await client().geminiToken(voice: "Algenib", purpose: .preview)
+        body = try XCTUnwrap(StubProtocol.lastBody)
+        XCTAssertNil(body["timezone"])
+    }
+
     // MARK: Token body — §13.1, §13.4
 
     func testAFreshSessionMintCarriesTheVoice() async throws {
@@ -134,7 +155,11 @@ final class LinkRequestBodyTests: XCTestCase {
         StubProtocol.reset(answering: .init(json: tokenReply(voice: "Zephyr")))
         _ = try await client().geminiToken()
         let body = try XCTUnwrap(StubProtocol.lastBody)
-        XCTAssertTrue(body.isEmpty, "an empty body is exactly today's behavior (§13)")
+        XCTAssertNil(body["voice"], "no choice means no voice field, so the Mac's default applies (§13)")
+        XCTAssertNil(body["resume_handle"])
+        XCTAssertNil(body["purpose"])
+        // The time zone is the one thing every session mint carries.
+        XCTAssertEqual(Set(body.keys), ["timezone"])
     }
 
     func testAPreviewMintSaysSo() async throws {

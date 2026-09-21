@@ -72,14 +72,19 @@ export function buildMobileSystemInstructionText({
   userName = "the user",
   accentInstruction = "",
   accentReminder = "",
+  localTime = "",
 } = {}) {
   const name = String(userName || "the user").trim() || "the user";
+  const clock = String(localTime || "").trim();
   const accent = String(accentInstruction || "").trim();
   const reminder = String(accentReminder || "").trim();
   return [
     `You are Iris, the realtime voice front-end for ${name}. You are running on ${name}'s phone.`,
     `${name} speaks English. Always respond in English, and interpret unclear or noisy audio as English.`,
     ...(accent ? [accent] : []),
+    // Stated, not assumed: without it the model reasons in UTC and "tomorrow"
+    // is wrong every evening in the Americas.
+    ...(clock ? [clock] : []),
     "Hermes is your worker brain for tools, terminal, files, deals, coding, deep research, and automations. It runs on the Mac, and you reach it through Iris Link.",
     "You also have built-in Google Search. Use Google Search directly for quick current facts, simple web lookups, and lightweight questions that do not need Hermes to do work.",
     "When the user explicitly asks you to search and already gives the subject, start the lookup immediately rather than asking what to search. When the Live API permits, acknowledge briefly that you are checking before delivering the grounded answer.",
@@ -113,6 +118,7 @@ export function buildMobileLiveConfig({
   contextParts = [],
   declarations = HERMES_FUNCTION_DECLARATIONS,
   resumeHandle = "",
+  localTime = "",
 } = {}) {
   const extraParts = Array.isArray(contextParts)
     ? contextParts.filter((part) => part && typeof part.text === "string" && part.text.trim())
@@ -165,7 +171,7 @@ export function buildMobileLiveConfig({
     ],
     systemInstruction: {
       parts: [
-        { text: buildMobileSystemInstructionText({ userName, accentInstruction, accentReminder }) },
+        { text: buildMobileSystemInstructionText({ userName, accentInstruction, accentReminder, localTime }) },
         ...extraParts,
       ],
     },
