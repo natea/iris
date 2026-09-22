@@ -377,6 +377,8 @@ IRIS_LOAD_TEST_DATA=false                         # demo mode
 
 Config resolution order: repo `.env` (dev) → `~/.iris/.env` (wizard/packaged) → bundled `.env`.
 
+Diagnostics — warnings, errors, Gemini/Hermes/Iris Link status changes and main-process crashes — are written to `~/.iris/logs/iris.log` (rotated at 2 MB, three files kept; set `IRIS_LOG_DIR` to move it). `tail -f ~/.iris/logs/iris.log` is the first place to look when something failed while the window was closed.
+
 ---
 
 
@@ -459,6 +461,7 @@ Release history lives in [CHANGELOG.md](CHANGELOG.md).
 Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md). Iris dispatches terminal-capable work to Hermes, so anything that can influence a dispatch is treated as a security issue rather than a UX one.
 
 - Your Gemini key and Hermes key live in mode-`0600` `~/.iris/.env`, are never returned to renderer state, and are never committed.
+- `~/.iris/logs/iris.log` holds diagnostics only: transcripts, briefs and tool arguments are never written, and anything shaped like a key or token is redacted.
 - Camera frames and wake-word audio are processed **entirely on-device** and never uploaded.
 - Conversation audio goes to Gemini Live while Iris is awake. Wake-word audio stays local while asleep; a brief silent connection may renew the Gemini resumption handle during long standby.
 - A bounded snapshot of Hermes `USER.md` and `MEMORY.md` is sent to Gemini at session setup. Brain-note content is retrieved only when relevant; semantic indexing/querying also uses Gemini embeddings when enabled.

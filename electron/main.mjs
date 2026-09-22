@@ -81,6 +81,7 @@ import { buildMobileLiveConfig, buildMobilePreviewConfig } from "./mobileSession
 import { createPairingStore } from "./pairingStore.mjs";
 import { createIrisLinkServer } from "./irisLinkServer.mjs";
 import { createApnsClient, resolveApnsConfig } from "./apnsClient.mjs";
+import { createFileLog } from "./fileLog.mjs";
 import { createPushNotifier } from "./pushNotifier.mjs";
 import { createLiveActivityNotifier } from "./liveActivityNotifier.mjs";
 import { findTailscaleIPv4 } from "./tailscaleAddress.mjs";
@@ -117,6 +118,13 @@ const { app, BrowserWindow, ipcMain, session, nativeImage, Menu, Tray, screen, g
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+
+// Diagnostics survive a closed window and a restart: ~/.iris/logs/iris.log.
+const fileLog = createFileLog();
+// Observes a main-process crash without changing how Electron handles it.
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  fileLog.error(`Uncaught ${origin}: ${error?.stack || error}`);
+});
 
 // Name the app "Iris" (menu bar / about panel). The Dock tile fully reflects this
 // only in a packaged build; in dev the generic Electron bundle name is used.
@@ -371,6 +379,7 @@ function noteLiveActivityChange() {
 }
 
 function emitEvent(event) {
+  fileLog.event(event);
   try {
     runSteps.record(event);
   } catch {
@@ -1527,6 +1536,9 @@ const irisBuildInfo = (() => {
   }
   return info;
 })();
+fileLog.info(
+  `Iris ${irisBuildInfo.version || "dev"} starting (commit ${irisBuildInfo.commit || "none"}${irisBuildInfo.dirty ? ", dirty" : ""}, pid ${process.pid}).`,
+);
 
 // Finished runs are immutable, so a rebuilt step list is cached for good.
 const historyStepCache = new Map();
