@@ -177,14 +177,15 @@ test("anything secret-shaped is redacted before it can reach a phone", () => {
     "Hermes refused: Authorization: Bearer sk-live-0123456789abcdefghijklmnop",
     "API_SERVER_KEY=hunter2-not-a-real-key-at-all",
     "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
-    "google key AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q",
+    // Built, not written: a literal in this shape trips GitHub secret scanning.
+    "google key " + "AIza" + "Sy" + "FAKE-not-a-real-google-key-0000000".padEnd(33, "0"),
     "sha 0123456789abcdef0123456789abcdef01234567",
   ].join("\n");
   const cleaned = sanitizeFailureText(leaky, 4000);
   assert.doesNotMatch(cleaned, /sk-live-0123456789/);
   assert.doesNotMatch(cleaned, /hunter2-not-a-real-key/);
   assert.doesNotMatch(cleaned, /ghp_ABCDEFGHIJ/);
-  assert.doesNotMatch(cleaned, /AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q/);
+  assert.doesNotMatch(cleaned, /AIzaSyFAKE/);
   assert.doesNotMatch(cleaned, /0123456789abcdef0123456789abcdef01234567/);
   assert.match(cleaned, /\[redacted\]/);
 
