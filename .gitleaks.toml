@@ -1,0 +1,16 @@
+# gitleaks configuration for Iris. Extends the default rules; allowlists only
+# the paths that legitimately hold fabricated, obviously-fake secrets.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fabricated fixtures and documentation examples"
+paths = [
+  '''^openspec/''',
+  '''\.md$''',
+]
+regexes = [
+  '''hunter2-not-a-real-key''',
+  '''sk-live-0123456789abcdefghijklmnop''',
+  '''ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345''',
+]
