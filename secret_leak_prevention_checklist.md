@@ -22,8 +22,8 @@ Checked 2026-09-25: **Secret Protection** and **Push protection** are both enabl
 
 - [x] Secret Protection: enabled.
 - [x] Push protection: enabled. Do not grant bypass to anyone.
-- [ ] **Branch ruleset on `main`** ("Create a branch ruleset" on the same page): require a pull request before merging. This makes issue → PR → merge the only path in, and later lets a gitleaks Action be a required check.
-- [ ] Settings → Notifications → *Security alerts* email on, so an alert does not sit for a day as #1 did.
+- [x] **Branch ruleset on `main`** — "Protect main", active (2026-09-25): pull request required (0 approvals — a solo repo cannot self-approve), force pushes blocked, deletions restricted, no bypass actors. Issue → PR → merge is now the only path in; a gitleaks Action can later be added as a required check.
+- [x] Notifications checked (2026-09-25): Dependabot alerts → on GitHub, Email, CLI; Watching → Email. Secret-scanning alerts have no separate row on a personal account — they go to repo admins through these, which are on.
 - [ ] Optional: Dependabot alerts (Settings → Advanced Security). Not a leak control; cheap.
 - [ ] Optional, stronger: a `gitleaks/gitleaks-action` workflow on pull requests, then make it a required check in the ruleset. The hook protects your machine; this protects the repo from any clone that skipped the hook.
 
