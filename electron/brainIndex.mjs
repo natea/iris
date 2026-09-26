@@ -43,7 +43,19 @@ const BATCH_SIZE = 100; // API maximum for batchEmbedContents
 const MAX_NOTE_CHARS = 100000;
 const CHUNK_CHARS = 2400;
 const CHUNK_OVERLAP = 320;
-const RETRY_DELAYS_MS = [800, 2000, 5000];
+const RETRY_DELAYS_MS = [800, 2000, 5000]; // transient 5xx / network
+// A 429 is a quota window, not a blip: the last step is long enough for a
+// per-minute window to reset. Retry-After, when Google sends it, wins.
+const QUOTA_DELAYS_MS = [5000, 15000, 30000, 65000];
+// A search is interactive: on quota it waits Retry-After once (capped) and
+// then falls back to lexical, instead of holding the UI for two minutes.
+const QUERY_QUOTA_DELAYS_MS = [5000];
+// Retry-After is trusted only this far: a skewed clock or a 24 h header must
+// not sleep the indexer with the index lock held.
+const MAX_RETRY_AFTER_MS = 120_000;
+const MIN_BATCH_SIZE = 20; // after the first 429, batches shrink toward this
+const BATCH_PAUSE_MS = 500;
+const CHECKPOINT_EVERY = 5; // batches between on-disk checkpoints
 
 // ---------- small utilities ----------
 
@@ -238,6 +250,7 @@ async function embedBatchOnce({ apiKey, model, requests }) {
     const detail = await response.text().catch(() => "");
     const error = new Error(`Embedding HTTP ${response.status}: ${detail.slice(0, 300)}`);
     error.status = response.status;
+    error.retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
     throw error;
   }
   const payload = await response.json();
@@ -254,21 +267,49 @@ async function embedBatchOnce({ apiKey, model, requests }) {
   });
 }
 
-async function embedBatch({ apiKey, model, requests, log }) {
-  let lastError = null;
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+/** `Retry-After` is seconds or an HTTP-date; anything else means "not given". */
+export function parseRetryAfter(header, now = Date.now()) {
+  if (!header) return null;
+  const text = String(header).trim();
+  if (/^\d+$/.test(text)) return Number(text) * 1000;
+  const at = Date.parse(text);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - now);
+}
+
+/**
+ * One batch, retried. 5xx and network errors use the short schedule; a 429 is
+ * a quota window and waits for it — Retry-After exactly when given, otherwise
+ * the long schedule. Returns the vectors and whether a 429 was seen, so the
+ * caller can slow down for the rest of the run.
+ */
+async function embedBatch({ apiKey, model, requests, log, quotaDelays = QUOTA_DELAYS_MS }) {
+  let transient = 0;
+  let quota = 0;
+  let sawQuota = false;
+  for (;;) {
     try {
-      return await embedBatchOnce({ apiKey, model, requests });
+      const vectors = await embedBatchOnce({ apiKey, model, requests });
+      return { vectors, sawQuota };
     } catch (error) {
-      lastError = error;
-      const retriable = error.status === 429 || error.status >= 500 || error.status === undefined;
-      if (!retriable || attempt === RETRY_DELAYS_MS.length) throw error;
-      const delay = RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400);
+      let delay;
+      if (error.status === 429) {
+        sawQuota = true;
+        if (quota >= quotaDelays.length) throw error;
+        delay = Math.min(error.retryAfterMs ?? quotaDelays[quota], MAX_RETRY_AFTER_MS);
+        quota += 1;
+      } else if (error.status >= 500 || error.status === undefined) {
+        if (transient >= RETRY_DELAYS_MS.length) throw error;
+        delay = RETRY_DELAYS_MS[transient];
+        transient += 1;
+      } else {
+        throw error;
+      }
+      delay += Math.floor(Math.random() * 400);
       log(`embedding batch failed (${error.message.slice(0, 120)}), retrying in ${delay}ms`);
       await sleep(delay);
     }
   }
-  throw lastError;
 }
 
 /** Picks the first embedding model this API key can actually use. */
@@ -276,9 +317,14 @@ export async function probeEmbedModel(apiKey, log = () => {}) {
   let lastError = null;
   for (const model of EMBED_MODELS) {
     try {
-      await embedBatchOnce({ apiKey, model, requests: [{ text: "probe", taskType: "RETRIEVAL_QUERY" }] });
+      // Through embedBatch, so a quota hit is waited out like any other. A
+      // 429 that outlasts the schedule is thrown, not treated as "try the
+      // next model": it says nothing about the model, and falling through
+      // would silently index the whole vault in the older embedding space.
+      await embedBatch({ apiKey, model, requests: [{ text: "probe", taskType: "RETRIEVAL_QUERY" }], log });
       return model;
     } catch (error) {
+      if (error.status === 429) throw error;
       lastError = error;
       log(`embed model ${model} unavailable (${String(error.message).slice(0, 120)})`);
     }
@@ -287,13 +333,14 @@ export async function probeEmbedModel(apiKey, log = () => {}) {
 }
 
 export async function embedQuery({ apiKey, model, text }) {
-  const [vector] = await embedBatch({
+  const { vectors } = await embedBatch({
     apiKey,
     model,
     requests: [{ text: text.slice(0, 2000), taskType: "RETRIEVAL_QUERY" }],
     log: () => {},
+    quotaDelays: QUERY_QUOTA_DELAYS_MS,
   });
-  return vector;
+  return vectors[0];
 }
 
 // ---------- on-disk index ----------
@@ -359,7 +406,10 @@ function writeIndexAtomic(vaultRoot, manifest, vectors) {
  * reuse vectors across renames (same hash, new path), prune deleted notes,
  * write atomically. Returns the fresh in-memory index + stats.
  */
-async function syncBrainIndexUnlocked({ vaultRoot, apiKey, log = () => {}, force = false, dryRun = false }) {
+async function syncBrainIndexUnlocked({
+  vaultRoot, apiKey, log = () => {}, force = false, dryRun = false,
+  batchSize: initialBatchSize = BATCH_SIZE, // tests use a small one
+}) {
   const startedAt = Date.now();
   const root = path.resolve(expandHome(vaultRoot));
   if (!fs.existsSync(root)) throw new Error(`Vault not found: ${root}`);
@@ -389,6 +439,9 @@ async function syncBrainIndexUnlocked({ vaultRoot, apiKey, log = () => {}, force
   const prunedCount = existing
     ? existing.manifest.notes.length - (chunks.length - pending.length)
     : 0;
+  if (existing && pending.length > 0 && reused.length > 0) {
+    log(`resuming: ${reused.length} of ${chunks.length} chunks already embedded`);
+  }
 
   if (dryRun) {
     return {
@@ -437,34 +490,83 @@ async function syncBrainIndexUnlocked({ vaultRoot, apiKey, log = () => {}, force
     };
   }
 
-  let embedded = 0;
-  for (let offset = 0; offset < pending.length; offset += BATCH_SIZE) {
-    const batch = pending.slice(offset, offset + BATCH_SIZE);
-    const vectorsBatch = await embedBatch({
-      apiKey,
+  // A checkpoint is an ordinary index holding only the rows finished so far.
+  // The next run's hash-diff treats every one of them as reusable, so a run
+  // cut short by a quota error resumes instead of starting over.
+  const done = new Set(reused.map(({ record }) => rowOf.get(record.id)));
+  const checkpoint = () => {
+    if (done.size === 0) return;
+    const rows = [...done].sort((a, b) => a - b);
+    const partial = new Float32Array(rows.length * EMBED_DIMS);
+    rows.forEach((row, i) => partial.set(vectors.subarray(row * EMBED_DIMS, (row + 1) * EMBED_DIMS), i * EMBED_DIMS));
+    writeIndexAtomic(root, {
+      version: VERSION,
       model,
-      requests: batch.map((record) => ({
-        text: record.embedText,
-        title: record.title,
-        taskType: "RETRIEVAL_DOCUMENT",
-      })),
-      log,
-    });
-    batch.forEach((record, i) => {
-      const target = rowOf.get(record.id);
-      vectors.set(vectorsBatch[i], target * EMBED_DIMS);
-      notes[target] = {
-        path: record.rel,
-        title: record.title,
-        folder: record.folder,
-        hash: record.hash,
-        chunkIndex: record.chunkIndex,
-        snippet: record.snippet,
-        mtimeMs: record.mtimeMs,
-      };
-      embedded += 1;
-    });
-    log(`embedded ${Math.min(offset + batch.length, pending.length)}/${pending.length}`);
+      dims: EMBED_DIMS,
+      vault: root,
+      // Not "now": the vault is not up to date until the run finishes, and
+      // the staleness check reads this field.
+      updatedAt: existing?.manifest.updatedAt ?? new Date(0).toISOString(),
+      partial: true,
+      notes: rows.map((row) => notes[row]),
+    }, partial);
+  };
+
+  let embedded = 0;
+  let batchSize = Number.isFinite(initialBatchSize)
+    ? Math.max(1, Math.min(BATCH_SIZE, Math.floor(initialBatchSize)))
+    : BATCH_SIZE;
+  let batches = 0;
+  let offset = 0;
+  try {
+    while (offset < pending.length) {
+      const batch = pending.slice(offset, offset + batchSize);
+      const { vectors: vectorsBatch, sawQuota } = await embedBatch({
+        apiKey,
+        model,
+        requests: batch.map((record) => ({
+          text: record.embedText,
+          title: record.title,
+          taskType: "RETRIEVAL_DOCUMENT",
+        })),
+        log,
+      });
+      batch.forEach((record, i) => {
+        const target = rowOf.get(record.id);
+        vectors.set(vectorsBatch[i], target * EMBED_DIMS);
+        notes[target] = {
+          path: record.rel,
+          title: record.title,
+          folder: record.folder,
+          hash: record.hash,
+          chunkIndex: record.chunkIndex,
+          snippet: record.snippet,
+          mtimeMs: record.mtimeMs,
+        };
+        done.add(target);
+        embedded += 1;
+      });
+      offset += batch.length;
+      batches += 1;
+      log(`embedded ${offset}/${pending.length}`);
+      if (sawQuota && batchSize > MIN_BATCH_SIZE) {
+        batchSize = Math.max(Math.min(MIN_BATCH_SIZE, initialBatchSize), Math.floor(batchSize / 2));
+        log(`quota hit; batch size now ${batchSize}`);
+      }
+      if (offset < pending.length) {
+        if (batches % CHECKPOINT_EVERY === 0) checkpoint();
+        await sleep(BATCH_PAUSE_MS);
+      }
+    }
+  } catch (error) {
+    // Keep what was earned before the failure; the rerun picks up from here.
+    // Nothing earned means nothing to write: a complete index must not be
+    // replaced by a partial copy of itself.
+    if (embedded > 0) {
+      try { checkpoint(); } catch { /* the original error is the one to report */ }
+    }
+    if (embedded > 0) log(`checkpoint written: ${done.size} of ${chunks.length} chunks; rerun to continue`);
+    throw error;
   }
 
   const manifest = {
