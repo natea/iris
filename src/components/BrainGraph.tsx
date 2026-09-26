@@ -4,6 +4,7 @@ import { forceCollide } from "d3-force";
 import { BrainCircuit, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { irisUrlTransform } from "../lib/links";
 import remarkBreaks from "remark-breaks";
 import type { HandState } from "../hooks/useHandControl";
 import { normalizeMarkdown } from "../lib/tasks";
@@ -1186,6 +1187,7 @@ export default function BrainGraph({
                 <div className="markdown-body">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkBreaks]}
+                    urlTransform={irisUrlTransform}
                     components={{
                       a: ({ href, children }) => {
                         if (href?.startsWith("#wiki=")) {

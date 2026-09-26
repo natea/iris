@@ -1,10 +1,12 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { safeObsidianUrl } from "./vaultLinks.mjs";
 
 export function safeExternalUrl(value) {
   try {
     const url = new URL(String(value || ""));
-    return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : null;
+    if (url.protocol === "https:" || url.protocol === "http:") return url.toString();
+    return safeObsidianUrl(url.toString());
   } catch {
     return null;
   }
