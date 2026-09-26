@@ -208,13 +208,18 @@ export function classifyHermesFailure(input) {
   // quoted back. Line breaks survive, so `firstLine` still means something.
   const safe = redact(text);
   const safeLog = redact(logTail);
+  // The log tail is the gateway's shared, long-lived buffer, not this run's
+  // output: a stale ECONNREFUSED or "cancelled" from hours ago must never
+  // classify an unrelated failure. Only the backend-start rule reads it,
+  // because that is the one failure whose cause is printed there and nowhere
+  // else. Every other rule matches this run's own text.
   const haystack = `${safe}\n${safeLog}`;
   const detail = firstLine(safe) || firstLine(safeLog);
 
   // 1. The chat is held by another Hermes client. Checked first because its
   //    text is unmistakable and nothing else should ever shadow it.
-  if (SESSION_IN_USE_RE.test(haystack)) {
-    const details = SESSION_DETAILS_RE.exec(haystack);
+  if (SESSION_IN_USE_RE.test(safe)) {
+    const details = SESSION_DETAILS_RE.exec(safe);
     const sessionId = details?.[1] ? sanitizeFailureText(details[1], 80) : "";
     const surface = details?.[2] ? details[2].trim() : "";
     const age = details?.[3] ? sanitizeFailureText(details[3], 24) : "";
@@ -265,7 +270,7 @@ export function classifyHermesFailure(input) {
   }
 
   // 4. Hermes is up but its model provider is not.
-  if (MODEL_UNREACHABLE_RE.test(haystack)) {
+  if (MODEL_UNREACHABLE_RE.test(safe)) {
     return {
       code: "model_unreachable",
       message: cap("Hermes couldn't reach its AI model service, so nothing ran. It's usually back shortly."),
@@ -275,7 +280,7 @@ export function classifyHermesFailure(input) {
   }
 
   // 5. Hermes ran out of steps rather than failing.
-  if (RUN_LIMIT_RE.test(haystack)) {
+  if (RUN_LIMIT_RE.test(safe)) {
     return {
       code: "run_limit",
       message: cap("Hermes hit its step limit before finishing. A narrower task usually gets there."),
@@ -285,7 +290,7 @@ export function classifyHermesFailure(input) {
   }
 
   // 6. Somebody stopped it.
-  if (STOPPED_RE.test(haystack)) {
+  if (STOPPED_RE.test(safe)) {
     return {
       code: "stopped_by_user",
       message: cap("That run was stopped before it finished."),
@@ -295,7 +300,7 @@ export function classifyHermesFailure(input) {
   }
 
   // 7. Nothing answered on 127.0.0.1:8642 (or the interactive socket died).
-  if (GATEWAY_UNREACHABLE_RE.test(haystack)) {
+  if (GATEWAY_UNREACHABLE_RE.test(safe)) {
     return {
       code: "gateway_unreachable",
       message: cap("Hermes isn't answering on your Mac, so nothing was sent."),

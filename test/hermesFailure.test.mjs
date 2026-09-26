@@ -227,3 +227,24 @@ test("failureBlock is the wire shape and nothing more", () => {
   assert.equal(block.code, "session_in_use");
   assert.equal(block.recovery, "start_new_chat");
 });
+
+test("a stale line in the shared log tail never classifies this run's failure", () => {
+  // The gateway's log tail is long-lived and shared across runs. What it
+  // said an hour ago about some MCP server is not why this dispatch failed.
+  const staleTail = [
+    "12:01:03 mcp[weather]: connect ECONNREFUSED 127.0.0.1:9911",
+    "12:01:04 run 8f2 cancelled by user",
+    "12:01:05 session abc is already in use by Hermes Desktop",
+  ].join("\n");
+  const unknown = classifyHermesFailure({ message: "Tool 'fetch' raised: boom", logTail: staleTail });
+  assert.equal(unknown.code, "unknown");
+  assert.match(unknown.message, /boom/);
+  // The one rule that legitimately reads the tail still does.
+  const start = classifyHermesFailure({
+    message: "Timed out starting Hermes interactive backend.",
+    logTail: "MCP server 'weather' failed to authenticate",
+  });
+  assert.equal(start.code, "backend_start_failed");
+  assert.equal(start.hint, "MCP server 'weather' failed to authenticate");
+});
+

@@ -143,9 +143,11 @@ final class WidgetBridge: ObservableObject {
     /// bonus, never as the mechanism.
     func registerBackgroundRefresh() {
         #if canImport(BackgroundTasks)
+        // `.main`, not nil: with nil the handler runs on a background queue
+        // and `assumeIsolated` traps the first time iOS grants a refresh.
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.refreshTaskIdentifier,
-            using: nil
+            using: .main
         ) { task in
             MainActor.assumeIsolated {
                 WidgetBridge.shared.handle(task: task)
