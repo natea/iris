@@ -113,6 +113,91 @@ When a run completes while no session is active, the app SHALL notify the user, 
 - **WHEN** notification permission has been refused
 - **THEN** the app still shows the completed run on next launch and does not claim to have notified the user
 
+### Requirement: Live progress without invention
+
+While a run is active the app SHALL show what the agent has reported — a headline and its steps — and SHALL NOT show a percentage, a duration, or a step the agent did not report. When step history is incomplete or unavailable the app SHALL say so and give the reason it was given.
+
+#### Scenario: Run in progress
+
+- **WHEN** the user opens an active run
+- **THEN** the app shows its status, the complete brief, the current headline, and the steps reported so far, with an indeterminate indicator rather than a percentage
+
+#### Scenario: Step history was lost
+
+- **WHEN** the desktop restarted or evicted a run's steps and they cannot be rebuilt
+- **THEN** the app says the step history is unavailable and why, and does not imply the run did nothing
+
+#### Scenario: Progress on the Lock Screen goes stale
+
+- **WHEN** a Live Activity is showing a run and the desktop stops reporting
+- **THEN** the activity shows that it is out of date instead of continuing to present progress
+
+### Requirement: Run history across chats
+
+The app SHALL list the same runs the desktop lists, including runs restored from the agent's transcript and runs from earlier chats, and SHALL open restored runs read-only. Historical runs SHALL NOT raise a notification, a spoken announcement, or a Live Activity.
+
+#### Scenario: After a new chat is started
+
+- **WHEN** the pinned agent session is replaced with a fresh one
+- **THEN** earlier runs remain visible under an earlier-chats grouping and none of them is announced or notified again
+
+### Requirement: A failed run says why
+
+When a run fails or cannot be dispatched, the app SHALL state the cause the desktop classified in one plain sentence, with a recovery step when one exists, and SHALL say the agent is unreachable only when that is the classified cause.
+
+#### Scenario: The chat is open elsewhere
+
+- **WHEN** a dispatch fails because the pinned chat is in use by another application
+- **THEN** the app says so and offers to start a new chat, and sends that run's exact brief to the new chat only after the user confirms by tapping
+
+#### Scenario: The assistant cannot start a new chat
+
+- **WHEN** the assistant produces any output while that offer is on screen
+- **THEN** no new chat is created and nothing is re-sent, because only the user's tap can do either
+
+#### Scenario: Unrecognized failure
+
+- **WHEN** the desktop cannot classify a failure
+- **THEN** the app shows a sanitized form of the agent's own first line rather than a generic message
+
+### Requirement: Voice selection and preview
+
+The app SHALL let the user choose the assistant's voice from the catalogue the desktop provides and hear a voice before choosing it. A chosen voice SHALL apply from the next conversation and SHALL NOT change during one, including across a reconnect. A preview SHALL carry no tools and no personal context, and SHALL NOT run while a conversation is live.
+
+#### Scenario: Hearing a voice
+
+- **WHEN** no conversation is live and the user taps a voice's preview control
+- **THEN** one sample line is spoken in that voice, its text is shown, and the selected voice is unchanged
+
+#### Scenario: Preview during a conversation
+
+- **WHEN** a conversation is live
+- **THEN** the preview controls are disabled and the reason is shown where the controls are, without scrolling
+
+#### Scenario: Preview fails
+
+- **WHEN** a preview cannot be fetched or played
+- **THEN** the app names the voice and the reason inline, and no spinner is left running
+
+#### Scenario: The control is reachable
+
+- **WHEN** the user taps a preview control with a thumb
+- **THEN** the hit area is at least 44 points square, so a near miss does not select the voice instead
+
+#### Scenario: Voice no longer offered
+
+- **WHEN** the desktop rejects the stored voice as unknown
+- **THEN** the app falls back to the desktop's default and tells the user
+
+### Requirement: Relative dates follow the user
+
+Every session SHALL be told the user's local date, time, and time zone as observed by the phone, so that relative dates in a dispatched brief resolve to the user's calendar and are written out in full.
+
+#### Scenario: Evening in a zone behind UTC
+
+- **WHEN** the user asks about “tomorrow” at a time when UTC is already the next day
+- **THEN** the brief names the user's tomorrow with its full local date
+
 ### Requirement: Agent unreachable is stated plainly
 
 When the agent cannot be reached — the desktop is asleep, the private network is down, or the service is not running — the app SHALL say which condition it detected and what would restore it, and SHALL NOT present the failure as an empty or successful result.
