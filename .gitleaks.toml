@@ -1,0 +1,28 @@
+# gitleaks configuration for Iris. Extends the default rules; allowlists only
+# the paths and strings that legitimately hold fabricated, obviously-fake
+# secrets. Every regex below is a fixture in a redaction or round-trip test —
+# verified by hand on 2026-09-23. Add to it only for a string that is plainly
+# not a credential; a real-looking one must be built at runtime instead
+# (see test/hermesFailure.test.mjs).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fabricated fixtures and documentation examples"
+paths = [
+  '''^openspec/''',
+  '''\.md$''',
+]
+regexes = [
+  '''hunter2-not-a-real-key''',
+  '''sk-live-0123456789abcdef''',
+  '''sk-live-9f3a2b1c4d5e6f7a''',
+  '''ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345''',
+  '''^abcdef1234567890$''',
+  '''AKIAABCDEFGHIJKLMNOP''',
+  '''^ab12cd34ef56$''',
+  '''eyJzdWIiOiIxMjM0NTY3ODkwIn0''',
+]
+# The Google-shaped fixture that GitHub alert #1 flagged; fixed in 6498933,
+# and the literal in this one commit is not a working key.
+commits = ["d5d66c1638c58aee729a15c4fbeb302d0a6c2858"]

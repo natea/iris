@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Refuse to commit anything secret-shaped. Runs gitleaks over the staged
+# changes only. Enable once per clone:  git config core.hooksPath .githooks
+# Install the scanner:                   brew install gitleaks
+set -euo pipefail
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed — staged changes were NOT scanned for secrets." >&2
+  echo "            brew install gitleaks   (then this hook scans every commit)" >&2
+  exit 0
+fi
+gitleaks git --staged --no-banner --redact --config .gitleaks.toml || {
+  echo >&2
+  echo "pre-commit: a secret-shaped string is staged. Remove it, or if it is a deliberate" >&2
+  echo "            fixture, build it at runtime (see test/hermesFailure.test.mjs)." >&2
+  exit 1
+}
