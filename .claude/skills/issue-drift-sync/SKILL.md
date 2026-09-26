@@ -10,7 +10,7 @@ Reports only. Never edits an issue, a label, a task file or a commit. Output is 
 ## Gather
 
 ```bash
-SINCE=${SINCE:-$(date -v-14d +%Y-%m-%d)}
+SINCE=${SINCE:-"14 days ago"}   # a git date phrase, so it works with BSD and GNU date
 gh issue list --repo natea/iris --state open --limit 200 --json number,title,labels,body,createdAt
 gh pr list --repo natea/iris --state all --limit 100 --json number,title,body,state,mergedAt,headRefName
 git log --since="$SINCE" --format='%h %s' main
@@ -19,7 +19,7 @@ git log --since="$SINCE" --format='%h %s' main
 ## Checks
 
 1. **Work without an issue.** Commits on `main` since `$SINCE` whose subject and body carry no `#n`, and open or merged PRs whose body has no `Closes #n` / `Fixes #n`. List them.
-2. **Issues whose ground moved.** For each open issue, take the paths under **Key files** and **Blast radius**; if any changed on `main` after the issue's `createdAt` (`git log --since=<createdAt> -- <path>`), list the issue and the commits. Its *Current state* may now be wrong.
+2. **Issues whose ground moved.** For each open issue, take the paths under **Key files** and **Blast radius**; if any was *modified* on `main` after the issue's `createdAt` (`git log --since=<createdAt> --diff-filter=M -- <path>` — a commit that merely added the file, e.g. an OpenSpec design committed after the issue cited it, is not drift), list the issue and the commits. Its *Current state* may now be wrong.
 3. **Unlabelled.** Open issues missing any of: `P*`, `clarity:*`, `risk:*`, `blast:*`, `size:*`, `type:*`.
 4. **Dishonest `ai-shippable`.** Open issues with `ai-shippable` whose clarity is below 4 or risk above 2.
 5. **OpenSpec ↔ tracker.** In every `openspec/changes/*/tasks.md` (not `archive/`): a `- [x]` task line with `(#n)` whose issue is still open; and an open issue that names a change whose matching task is still `- [ ]` after the issue's PR merged.
