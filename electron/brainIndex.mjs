@@ -47,6 +47,12 @@ const RETRY_DELAYS_MS = [800, 2000, 5000]; // transient 5xx / network
 // A 429 is a quota window, not a blip: the last step is long enough for a
 // per-minute window to reset. Retry-After, when Google sends it, wins.
 const QUOTA_DELAYS_MS = [5000, 15000, 30000, 65000];
+// A search is interactive: on quota it waits Retry-After once (capped) and
+// then falls back to lexical, instead of holding the UI for two minutes.
+const QUERY_QUOTA_DELAYS_MS = [5000];
+// Retry-After is trusted only this far: a skewed clock or a 24 h header must
+// not sleep the indexer with the index lock held.
+const MAX_RETRY_AFTER_MS = 120_000;
 const MIN_BATCH_SIZE = 20; // after the first 429, batches shrink toward this
 const BATCH_PAUSE_MS = 500;
 const CHECKPOINT_EVERY = 5; // batches between on-disk checkpoints
@@ -277,7 +283,7 @@ export function parseRetryAfter(header, now = Date.now()) {
  * the long schedule. Returns the vectors and whether a 429 was seen, so the
  * caller can slow down for the rest of the run.
  */
-async function embedBatch({ apiKey, model, requests, log }) {
+async function embedBatch({ apiKey, model, requests, log, quotaDelays = QUOTA_DELAYS_MS }) {
   let transient = 0;
   let quota = 0;
   let sawQuota = false;
@@ -289,8 +295,8 @@ async function embedBatch({ apiKey, model, requests, log }) {
       let delay;
       if (error.status === 429) {
         sawQuota = true;
-        if (quota >= QUOTA_DELAYS_MS.length) throw error;
-        delay = error.retryAfterMs ?? QUOTA_DELAYS_MS[quota];
+        if (quota >= quotaDelays.length) throw error;
+        delay = Math.min(error.retryAfterMs ?? quotaDelays[quota], MAX_RETRY_AFTER_MS);
         quota += 1;
       } else if (error.status >= 500 || error.status === undefined) {
         if (transient >= RETRY_DELAYS_MS.length) throw error;
@@ -311,9 +317,14 @@ export async function probeEmbedModel(apiKey, log = () => {}) {
   let lastError = null;
   for (const model of EMBED_MODELS) {
     try {
-      await embedBatchOnce({ apiKey, model, requests: [{ text: "probe", taskType: "RETRIEVAL_QUERY" }] });
+      // Through embedBatch, so a quota hit is waited out like any other. A
+      // 429 that outlasts the schedule is thrown, not treated as "try the
+      // next model": it says nothing about the model, and falling through
+      // would silently index the whole vault in the older embedding space.
+      await embedBatch({ apiKey, model, requests: [{ text: "probe", taskType: "RETRIEVAL_QUERY" }], log });
       return model;
     } catch (error) {
+      if (error.status === 429) throw error;
       lastError = error;
       log(`embed model ${model} unavailable (${String(error.message).slice(0, 120)})`);
     }
@@ -327,6 +338,7 @@ export async function embedQuery({ apiKey, model, text }) {
     model,
     requests: [{ text: text.slice(0, 2000), taskType: "RETRIEVAL_QUERY" }],
     log: () => {},
+    quotaDelays: QUERY_QUOTA_DELAYS_MS,
   });
   return vectors[0];
 }
@@ -492,14 +504,18 @@ async function syncBrainIndexUnlocked({
       model,
       dims: EMBED_DIMS,
       vault: root,
-      updatedAt: new Date().toISOString(),
+      // Not "now": the vault is not up to date until the run finishes, and
+      // the staleness check reads this field.
+      updatedAt: existing?.manifest.updatedAt ?? new Date(0).toISOString(),
       partial: true,
       notes: rows.map((row) => notes[row]),
     }, partial);
   };
 
   let embedded = 0;
-  let batchSize = Math.max(1, Math.min(BATCH_SIZE, initialBatchSize));
+  let batchSize = Number.isFinite(initialBatchSize)
+    ? Math.max(1, Math.min(BATCH_SIZE, Math.floor(initialBatchSize)))
+    : BATCH_SIZE;
   let batches = 0;
   let offset = 0;
   try {
@@ -544,8 +560,12 @@ async function syncBrainIndexUnlocked({
     }
   } catch (error) {
     // Keep what was earned before the failure; the rerun picks up from here.
-    try { checkpoint(); } catch { /* the original error is the one to report */ }
-    if (done.size > 0) log(`checkpoint written: ${done.size} of ${chunks.length} chunks; rerun to continue`);
+    // Nothing earned means nothing to write: a complete index must not be
+    // replaced by a partial copy of itself.
+    if (embedded > 0) {
+      try { checkpoint(); } catch { /* the original error is the one to report */ }
+    }
+    if (embedded > 0) log(`checkpoint written: ${done.size} of ${chunks.length} chunks; rerun to continue`);
     throw error;
   }
 

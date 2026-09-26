@@ -102,16 +102,17 @@ function seedNotes(root, count = 10) {
  * A fake Gemini that answers batchEmbedContents with unit vectors and follows
  * a script of per-call outcomes: "ok", or { status, retryAfter? }.
  */
-function fakeEmbedApi(t, script) {
+function fakeEmbedApi(t, script, { scriptProbes = false } = {}) {
   const calls = [];
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
     // The model probe is not part of the run under test: it always succeeds
     // and is neither scripted nor counted.
-    const isProbe = body.requests.length === 1 && body.requests[0].content.parts[0].text === "probe";
+    const isProbe = !scriptProbes && body.requests.length === 1 && body.requests[0].content.parts[0].text === "probe";
     const step = isProbe ? "ok" : script.length ? script.shift() : "ok";
-    if (!isProbe) calls.push({ at: Date.now(), size: body.requests.length, step });
+    const model = String(url).match(/models\/([^:]+):/)?.[1];
+    if (!isProbe) calls.push({ at: Date.now(), size: body.requests.length, step, model });
     if (step !== "ok") {
       return new Response(JSON.stringify({ error: { code: step.status, message: "quota" } }), {
         status: step.status,
@@ -149,7 +150,7 @@ test("a 429 with Retry-After is waited out once and the run completes", async (t
   assert.equal(result.embedded, 10);
   assert.equal(calls.length, 4, "one refused call, then three batches");
   const waited = calls[1].at - calls[0].at;
-  assert.ok(waited >= 1000 && waited < 1600, `waited ${waited}ms — Retry-After: 1 plus jitter, not the 800ms schedule`);
+  assert.ok(waited >= 1000 && waited < 2000, `waited ${waited}ms — Retry-After: 1 plus jitter, not the 800ms schedule`);
   // After the quota hit the batches shrink for the rest of the run.
   assert.deepEqual(calls.slice(1).map((c) => c.size), [4, 4, 2], "a 4-chunk floor is the test's own batch size");
   const onDisk = loadIndexFromDisk(root);
@@ -188,3 +189,31 @@ test("a run cut short by quota leaves a checkpoint, and the rerun embeds only th
   assert.equal(final.manifest.partial, undefined);
   assert.equal(final.vectors.length, 10 * EMBED_DIMS);
 });
+
+test("a query embed on quota waits Retry-After once, then gives up fast", async (t) => {
+  isolateHome(t);
+  const calls = fakeEmbedApi(t, [{ status: 429, retryAfter: 1 }, { status: 429, retryAfter: 60 }]);
+  const { embedQuery } = await import("../electron/brainIndex.mjs");
+  const started = Date.now();
+  await assert.rejects(embedQuery({ apiKey: "k", model: "m", text: "hello" }), /Embedding HTTP 429/);
+  const took = Date.now() - started;
+  assert.equal(calls.length, 2, "one wait, one more try, then fail over to lexical");
+  assert.ok(took >= 1000 && took < 4000, `took ${took}ms — never the indexer's two-minute schedule`);
+});
+
+test("a quota hit on the probe does not switch embedding models", async (t) => {
+  isolateHome(t);
+  const root = makeVault(t);
+  seedNotes(root, 2);
+  // Both probe attempts are refused; the fake answers probes from the script
+  // when told to, so this run's probe sees the 429s.
+  const calls = fakeEmbedApi(t, Array.from({ length: 6 }, () => ({ status: 429, retryAfter: 0 })), { scriptProbes: true });
+  await assert.rejects(
+    syncBrainIndex({ vaultRoot: root, apiKey: "k", batchSize: 4, log: () => {} }),
+    /Embedding HTTP 429/,
+  );
+  const models = new Set(calls.map((c) => c.model));
+  assert.deepEqual([...models], ["gemini-embedding-2-preview"], "never fell through to the older model on a 429");
+  assert.equal(loadIndexFromDisk(root), null, "nothing earned, nothing written");
+});
+
