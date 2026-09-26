@@ -12,21 +12,20 @@ What is already done, what only you can do (GitHub settings), and what to do if 
 
 ## You: local machine
 
-- [ ] `brew install gitleaks` — until this is installed the hook prints a warning and lets the commit through. It does not scan.
-- [ ] `gitleaks git --no-banner --redact` from the repo root once, to scan the whole history for anything else key-shaped. Expect the `.md` and `openspec/` allowlist to keep documentation examples quiet.
+- [x] `brew install gitleaks` — installed 8.30.0 on 2026-09-23; the hook scans every commit in this clone.
+- [x] Full-history scan run (92 commits): eight hits, all test fixtures, checked by hand and allowlisted by exact value (commit `d5beb1f`). Clean since.
 - [ ] In every other clone or worktree of this repo: `git config core.hooksPath .githooks`. (`~/.herdr/worktrees/iris/*` and `.claude/worktrees/*` share the main clone's config only if they were created from it with `git worktree add`; check with `git config --get core.hooksPath` inside each.)
 
-## You: GitHub → natea/iris → Settings → Code security
+## You: GitHub → natea/iris → Settings → Advanced Security
 
-The API would not toggle these on this repo, so they are clicks:
+Checked 2026-09-25: **Secret Protection** and **Push protection** are both enabled, and that is everything GitHub offers a personal-account public repo. *Non-provider patterns* and *validity checks* belong to the paid Secret Protection add-on, which is organizations-only — the API exposes the fields but will not enable them here. The local gitleaks hook covers the generic-pattern gap those would have filled (its default rules flag generic API keys, private keys, JWTs and auth headers, as the history scan showed).
 
-- [ ] **Secret scanning → Non-provider patterns: Enable.** Catches generic key shapes (`API_KEY=…`, private keys, JWTs) that have no vendor pattern. This is the one that would have caught `API_SERVER_KEY` if it were ever pasted.
-- [ ] **Secret scanning → Validity checks: Enable.** GitHub asks the provider whether a found key is live, so the next alert says *active* or *inactive* instead of *unknown*. Alert #1 said *unknown*; this would have said *inactive* immediately.
-- [ ] **Push protection: confirm Enabled** (it is, per API) and **do not grant bypass** to anyone. Bypass is the setting that turns a hard stop into a warning.
-- [ ] **Secret scanning → Alerts → notify:** make sure your account has *Security alerts* email on for this repo (Settings → Notifications → "Security alerts"), so an alert does not sit for a day as #1 did.
-- [ ] **Dependabot alerts / security updates: Enable** (currently disabled). Not a leak control, but it is on the same page and cheap.
-- [ ] **Branch protection on `main`** (Settings → Branches → Add rule): require a pull request before merging, and *Require status checks* once a scanning action exists (below). This is what stops a direct push from bypassing review.
-- [ ] Optional, stronger: **Actions → add a gitleaks workflow** (`gitleaks/gitleaks-action`) on pull requests, then make it a required status check. The pre-commit hook protects your machine; this protects the repo from any clone that skipped the hook.
+- [x] Secret Protection: enabled.
+- [x] Push protection: enabled. Do not grant bypass to anyone.
+- [ ] **Branch ruleset on `main`** ("Create a branch ruleset" on the same page): require a pull request before merging. This makes issue → PR → merge the only path in, and later lets a gitleaks Action be a required check.
+- [ ] Settings → Notifications → *Security alerts* email on, so an alert does not sit for a day as #1 did.
+- [ ] Optional: Dependabot alerts (Settings → Advanced Security). Not a leak control; cheap.
+- [ ] Optional, stronger: a `gitleaks/gitleaks-action` workflow on pull requests, then make it a required check in the ruleset. The hook protects your machine; this protects the repo from any clone that skipped the hook.
 
 ## Rules for the code (already in AGENTS.md — repeated here because this is the leak surface)
 
