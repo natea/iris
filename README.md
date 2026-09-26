@@ -25,6 +25,10 @@ Talk naturally. Delegate real work. Control it with your hands. Let it float ove
 
 
 
+## Working on Iris
+
+Work is queued as GitHub issues at https://github.com/natea/iris/issues and designed in `openspec/changes/`. Labels tell an agent whether an issue is ready to take (`clarity:4+`), how careful the change must be (`risk`), and whether it can run beside other work (`parallel:n` / `serial`). The rules, the lanes for this repo, and how to file and finish an issue are in [`AGENTS.md`](AGENTS.md); `node scripts/github-labels.mjs` recreates the labels on a fresh repo.
+
 ## 🎬 Demo
 
 > 🔊 **Sound on — Iris is a voice tool.** A real session: waking Iris by voice, delegating a task to Hermes mid-conversation, live tool steps streaming in, opening the result hands-free with a finger point, and Glass HUD mode over the desktop.

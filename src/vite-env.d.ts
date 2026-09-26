@@ -50,6 +50,7 @@ type IrisConfig = {
   geminiApiKeyConfigured: boolean;
   geminiModel: string;
   geminiVoice: string;
+  geminiAccent: string;
   hermesUrl: string;
   hermesKey: string;
   hermesKeyConfigured: boolean;
@@ -70,11 +71,13 @@ type IrisConfig = {
   micDevice: string;
   cameraDevice: string;
   configured: boolean;
-  voices: string[];
+  voices: { value: string; label: string }[];
+  accents: { value: string; label: string }[];
   models: string[];
   configPath: string;
   voiceDuplexMode: string;
   speakerEchoGuard: string;
+  linkEnabled: boolean;
 };
 
 type IrisTestResult = { ok: boolean; error?: string; health?: Record<string, unknown> };
@@ -187,6 +190,30 @@ type BrainSearchResult = {
   error?: string;
 };
 
+type IrisLinkDevice = {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastSeenAt: number;
+  pushEnabled?: boolean;
+  pushEnvironment?: string;
+};
+
+type IrisLinkStatus = {
+  enabled: boolean;
+  listening: boolean;
+  host: string | null;
+  port: number | null;
+  reason: string;
+  tailscaleAddress: string | null;
+  pushConfigured?: boolean;
+  devices: IrisLinkDevice[];
+};
+
+type IrisLinkOffer =
+  | { ok: true; payload: string; code: string; expiresAt: number }
+  | { ok: false; error: string };
+
 type IrisApi = {
   startSidecar: (options?: { mode?: SidecarMode }) => Promise<{ running: boolean; pid: number | null }>;
   stopSidecar: () => Promise<{ running: boolean; pid: number | null }>;
@@ -201,7 +228,7 @@ type IrisApi = {
   saveConfig: (updates: Record<string, string>) => Promise<IrisConfig>;
   testGemini: (key?: string) => Promise<IrisTestResult>;
   testHermes: (payload?: { url?: string; key?: string }) => Promise<IrisTestResult>;
-  previewVoice: (payload?: { voice?: string; key?: string }) => Promise<IrisTestResult>;
+  previewVoice: (payload?: { voice?: string; accent?: string; key?: string }) => Promise<IrisTestResult>;
   getHermesHistory: () => Promise<HermesHistoryResult>;
   listHermesSessions: () => Promise<HermesSessionsResult>;
   createHermesSession: () => Promise<{ ok: boolean; id?: string; error?: string }>;
@@ -216,6 +243,10 @@ type IrisApi = {
     value?: string;
     choice?: "once" | "session" | "always" | "deny";
   }) => Promise<{ status: string; error?: string }>;
+  getLinkStatus: () => Promise<IrisLinkStatus>;
+  createLinkOffer: () => Promise<IrisLinkOffer>;
+  listLinkDevices: () => Promise<IrisLinkDevice[]>;
+  revokeLinkDevice: (deviceId: string) => Promise<{ ok: boolean; deviceId?: string; error?: string }>;
   loadBrain: () => Promise<BrainGraphResult>;
   readBrainNote: (relPath: string) => Promise<BrainNoteResult>;
   searchBrain: (query: string, topK?: number) => Promise<BrainSearchResult>;

@@ -1,0 +1,173 @@
+name: IrisLivePrototype
+
+options:
+  bundleIdPrefix: app.iris
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+targets:
+  IrisLivePrototype:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # Compiled into the app AND into IrisWidgets. The Live Activity's
+      # ActivityAttributes has to be the same type on both sides or ActivityKit
+      # silently drops every push, and the widget's views live here so the app
+      # can render them to images for review. A framework would be a heavier
+      # way to say the same thing.
+      - path: Shared
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Iris
+        NSMicrophoneUsageDescription: "Iris streams your voice to the Gemini Live API so you can talk to the assistant."
+        # Scanning the desktop's pairing QR opens iris-link://pair?… directly in
+        # this app. The scheme exists so a phone camera never offers to
+        # web-search a live pairing secret.
+        CFBundleURLTypes:
+          - CFBundleURLName: app.iris.liveprototype.pair
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - iris-link
+          # LINK_API.md §14.8: a Live Activity and a widget cannot call into
+          # the app, only hand iOS a URL. `iris://run/<id>` opens that run.
+          # Deliberately a SEPARATE scheme from iris-link, which carries
+          # pairing secrets: neither parser ever sees the other's URLs.
+          - CFBundleURLName: app.iris.liveprototype.run
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - iris
+        # Iris Link is reached at a Tailscale 100.64/10 address over the utun
+        # interface, which is not the immediate local network, so this prompt is
+        # not expected to appear. Declared anyway: if iOS ever does classify a
+        # tailnet peer as local, the alternative is a silent failure.
+        # Keeps an ACTIVE conversation alive when the app is backgrounded or the
+        # phone is locked. iOS still refuses to START capture from the background.
+        # `audio` keeps an ACTIVE conversation alive when backgrounded.
+        # `fetch` is for the widget's BGAppRefreshTask (§14.6): budgeted by
+        # iOS, unreliable by design, and never promised in the UI.
+        UIBackgroundModes: [audio, fetch]
+        BGTaskSchedulerPermittedIdentifiers:
+          - app.iris.liveprototype.widget-refresh
+        # LINK_API.md §14.8. Without this there are no Live Activities at all.
+        # NSSupportsLiveActivitiesFrequentUpdates is deliberately NOT set: the
+        # desktop's 8-second coalescing window plus apns-priority 5 is designed
+        # to stay inside Apple's ordinary budget, and claiming frequent updates
+        # would add a switch in Settings that Iris does not honour.
+        NSSupportsLiveActivities: true
+        NSLocalNetworkUsageDescription: "Iris connects to the Iris app on your Mac over your private Tailscale network to start voice sessions."
+        # PROTOTYPE ONLY. Observed on device: iOS blocks plain HTTP to a Tailscale
+        # IP with NSURLErrorAppTransportSecurityRequiresSecureConnection (-1022);
+        # ATS does apply to IP literals, and exception domains cannot name an IP
+        # range. The app only ever connects to a 100.64.0.0/10 address it parsed
+        # from a pairing QR (LinkClient refuses anything else) and to Google over
+        # TLS, so this is contained — but the real app must not ship it. The fix
+        # is HTTPS on the Mac's MagicDNS name with a `tailscale cert` certificate.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iris.liveprototype
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        # Leave DEVELOPMENT_TEAM empty: pick your team in Xcode > Signing.
+        DEVELOPMENT_TEAM: YA3FM9C24T
+        # Push Notifications + Time Sensitive Notifications (LINK_API.md §11.6).
+        # Automatic signing has to be able to add the Push Notifications
+        # capability to app.iris.liveprototype on this team; if provisioning
+        # complains, open the project in Xcode once and let it fix the profile.
+        CODE_SIGN_ENTITLEMENTS: IrisLivePrototype.entitlements
+        SWIFT_STRICT_CONCURRENCY: minimal
+    dependencies:
+      # Embeds IrisWidgets.appex in the app's PlugIns folder.
+      - target: IrisWidgets
+        embed: true
+
+  # LINK_API.md §14.8: a Widget Extension is REQUIRED — it renders both the
+  # Live Activity (the system wakes this process to draw it when a push
+  # arrives, with the app suspended) and the home-screen widget. It gets no
+  # aps-environment and no background mode; it never talks to the network.
+  IrisWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widgets
+      - path: Shared
+    info:
+      path: IrisWidgets-Info.plist
+      properties:
+        CFBundleDisplayName: Hermes
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iris.liveprototype.widgets
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: YA3FM9C24T
+        # App Group only (§14.7) — the extension reads the app's snapshot and
+        # holds no credential of its own.
+        CODE_SIGN_ENTITLEMENTS: IrisWidgets.entitlements
+        SWIFT_STRICT_CONCURRENCY: minimal
+        SKIP_INSTALL: YES
+
+  IrisLivePrototypeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: IrisLivePrototype
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iris.liveprototype.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: YA3FM9C24T
+
+  # The gate and the tool-result shapes are a contract with the desktop, so
+  # they are unit-tested rather than only exercised by hand on a phone.
+  IrisLivePrototypeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: IrisLivePrototype
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iris.liveprototype.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: YA3FM9C24T
+        SWIFT_STRICT_CONCURRENCY: minimal
+
+schemes:
+  IrisLivePrototype:
+    build:
+      targets:
+        IrisLivePrototype: all
+        IrisWidgets: all
+        IrisLivePrototypeTests: [test]
+        IrisLivePrototypeUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - IrisLivePrototypeTests
+        - IrisLivePrototypeUITests

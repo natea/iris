@@ -17,6 +17,22 @@ test("resume handles expire deterministically", () => {
   assert.equal(store.fresh(1001), null);
 });
 
+test("resume handles are not reused after voice settings change", () => {
+  const store = new ResumeHandleStore({ ttlMs: 100 });
+  store.bind("voice=Iapetus");
+  store.update("handle-a", 1000);
+  assert.equal(store.fresh(1050, "voice=Iapetus"), "handle-a");
+  assert.equal(store.stale(1050, "voice=Iapetus"), false);
+  // Rotated handles from the same session keep the original signature.
+  store.update("handle-b", 1060);
+  assert.equal(store.fresh(1070, "voice=Algenib"), null);
+  assert.equal(store.stale(1070, "voice=Algenib"), true);
+  // Callers that do not pass a signature keep the old behaviour.
+  assert.equal(store.fresh(1070), "handle-b");
+  store.clear();
+  assert.equal(store.stale(1070, "voice=Algenib"), false);
+});
+
 test("announcement delivery requeues interrupted turns", () => {
   const ledger = new AnnouncementLedger({ maxPending: 3 });
   ledger.enqueue("one");

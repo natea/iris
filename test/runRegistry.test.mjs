@@ -81,3 +81,33 @@ test("registry preserves complete Hermes output without truncation", (t) => {
   registry.update("long-output", { status: "completed", output });
   assert.equal(new RunRegistry({ filePath }).get("long-output").output, output);
 });
+
+test("run origin defaults to the desktop and survives updates and restart", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iris-run-origin-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const filePath = path.join(dir, "runs.json");
+
+  const registry = new RunRegistry({ filePath });
+  registry.start({ runId: "desk-1", task: "Desktop work", sessionId: "s" });
+  registry.start({
+    runId: "phone-1",
+    task: "Phone work",
+    sessionId: "s",
+    origin: "device:abc123",
+  });
+  assert.equal(registry.get("desk-1").origin, "desktop");
+  assert.equal(registry.get("phone-1").origin, "device:abc123");
+
+  // A status update must never quietly re-home a run to the desktop, or the
+  // Mac would start speaking results the phone owns.
+  registry.update("phone-1", { status: "completed", output: "done" });
+  assert.equal(registry.get("phone-1").origin, "device:abc123");
+
+  const restored = new RunRegistry({ filePath });
+  assert.equal(restored.get("phone-1").origin, "device:abc123");
+  assert.equal(restored.get("desk-1").origin, "desktop");
+  assert.equal(
+    restored.list({ sessionId: "s" }).every((entry) => typeof entry.origin === "string"),
+    true,
+  );
+});

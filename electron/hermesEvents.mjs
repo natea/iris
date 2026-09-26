@@ -32,8 +32,42 @@ export function formatHermesCompletionEvent({
   output,
   userName,
   wakingFromSleep = false,
+  // The classified `{ code, message, recovery }` for a run that FAILED, or
+  // null. When present it replaces the "summarize the result" instructions
+  // outright: there is no result, and the thing Iris must never do is invent
+  // one or repeat the old "Hermes is not reachable" line for a Hermes that is
+  // running perfectly well.
+  failure = null,
 }) {
   const name = String(userName || "the user");
+  if (failure?.message) {
+    return [
+      "SYSTEM_EVENT_HERMES_COMPLETE",
+      `run_id: ${runId}`,
+      `status: ${status}`,
+      `failure_code: ${failure.code || "unknown"}`,
+      `recovery: ${failure.recovery || "none"}`,
+      "instructions_to_iris:",
+      `- The task did NOT run. Tell ${name} that, in one short sentence, and give the reason below in plain words.`,
+      "- Say the reason as written. Do not restate it as a network problem, and do not say Hermes is unreachable unless the reason says so.",
+      "- You have NO result. Do not summarize, predict, or invent one.",
+      ...(failure.recovery === "start_new_chat"
+        ? [
+            `- Offer the fix out loud, then stop: tell ${name} they can tap "Start a new chat and try again" on the run in the Iris app.`,
+            "- You CANNOT start a new chat yourself and there is no tool for it. If they ask you to, say it has to be the button — it changes which chat the Mac uses too.",
+          ]
+        : failure.recovery === "retry"
+          ? ["- If they want it done, ask them to say so and you will stage the task again."]
+          : failure.recovery === "check_mac"
+            ? [`- Say it needs attention on the Mac. Do not promise to fix it yourself.`]
+            : []),
+      ...(wakingFromSleep
+        ? ["- Iris was woken for this. Deliver it directly without a greeting."]
+        : []),
+      "failure_reason:",
+      String(failure.message),
+    ].join("\n");
+  }
   return [
     "SYSTEM_EVENT_HERMES_COMPLETE",
     `run_id: ${runId}`,

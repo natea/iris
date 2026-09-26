@@ -637,6 +637,19 @@ export default function App() {
       return;
     }
 
+    // The pinned Hermes chat changed outside this window — today that means a
+    // paired phone tapped "Start a new chat and try again" after a run failed
+    // with `session_in_use`. There is ONE pinned chat, not one per surface, so
+    // the Work Stream follows it here rather than silently drifting until the
+    // next restart.
+    if (event.type === "hermes_session_changed") {
+      const next = readString((event as { session_id?: unknown }).session_id).trim();
+      if (!next || next === hermesSessionRef.current) return;
+      pushLog("info", `A paired phone started a new Hermes chat; now using ${next}.`);
+      void switchHermesSession(next);
+      return;
+    }
+
     if (event.type === "audio_state") {
       const state = readString(event.state, "idle");
       setAudioState(state);

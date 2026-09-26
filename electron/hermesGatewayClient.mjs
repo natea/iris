@@ -6,6 +6,28 @@ import WebSocketPackage from "ws";
 
 const READY_RE = /HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/;
 
+// `hermes serve` has to load every configured MCP server before it prints
+// READY. One slow or broken server (a Strava OAuth refresh that never
+// answers) pushed that past the old allowance, and the failure was reported
+// to the phone as "Hermes is not reachable". Give it real room, and let the
+// user raise it further with IRIS_HERMES_START_TIMEOUT_MS.
+export const DEFAULT_STARTUP_TIMEOUT_MS = 90_000;
+
+// A backend that cannot start will not start any faster if we keep asking.
+// One log showed sixteen spawns in six minutes; each one re-ran the same
+// failing MCP handshake. Consecutive failures back off 2s, 4s, 8s … capped.
+export const START_BACKOFF_BASE_MS = 2_000;
+export const START_BACKOFF_MAX_MS = 60_000;
+
+export function startBackoffMs(consecutiveFailures, {
+  base = START_BACKOFF_BASE_MS,
+  max = START_BACKOFF_MAX_MS,
+} = {}) {
+  const failures = Math.max(0, Number(consecutiveFailures) || 0);
+  if (failures < 1) return 0;
+  return Math.min(base * 2 ** (failures - 1), max);
+}
+
 export class HermesGatewayRpcError extends Error {
   constructor(message, { code = 0, data } = {}) {
     super(message);
@@ -22,9 +44,10 @@ export class HermesGatewayClient extends EventEmitter {
     WebSocketImpl = globalThis.WebSocket || WebSocketPackage,
     spawnImpl = spawn,
     log = () => {},
-    startupTimeoutMs = 45000,
+    startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
     cwd = os.homedir(),
     terminalCwd = process.env.IRIS_HERMES_CWD || "",
+    now = () => Date.now(),
   }) {
     super();
     this.candidates = candidates;
@@ -46,6 +69,16 @@ export class HermesGatewayClient extends EventEmitter {
     this.sequence = 0;
     this.pending = new Map();
     this.logTail = "";
+    this.now = now;
+    // Respawn back-off state. Reset the moment a start succeeds.
+    this.startFailures = 0;
+    this.nextStartAllowedAt = 0;
+    this.lastStartError = null;
+  }
+
+  /** How long a caller must wait before another spawn is attempted (0 = now). */
+  startBackoffRemainingMs() {
+    return Math.max(0, this.nextStartAllowedAt - this.now());
   }
 
   async start() {
@@ -63,18 +96,40 @@ export class HermesGatewayClient extends EventEmitter {
       await this.connect();
       return this;
     }
+    // Repeated start failures back off instead of respawning in a tight loop.
+    // The error that comes back is the LAST REAL ONE, with its log tail, so
+    // the failure a phone is shown still names the true cause rather than
+    // "backing off".
+    const wait = this.startBackoffRemainingMs();
+    if (wait > 0 && this.lastStartError) {
+      this.log(
+        `Hermes interactive backend start is backing off for ${Math.ceil(wait / 1000)}s after ${this.startFailures} failed start${this.startFailures === 1 ? "" : "s"}.`,
+      );
+      throw this.lastStartError;
+    }
     let lastError = null;
     for (const candidate of this.candidates()) {
       try {
         await this.#spawn(candidate);
         await this.connect();
+        this.startFailures = 0;
+        this.nextStartAllowedAt = 0;
+        this.lastStartError = null;
         return this;
       } catch (error) {
         lastError = error;
         this.#stopProcess();
       }
     }
-    throw lastError || new Error("No usable Hermes runtime could start the interactive gateway.");
+    const error =
+      lastError || new Error("No usable Hermes runtime could start the interactive gateway.");
+    // Carry the tail so classification can name the cause (a failing MCP
+    // server, a missing runtime) instead of guessing at "unreachable".
+    error.logTail = this.logTail.slice(-4000);
+    this.startFailures += 1;
+    this.nextStartAllowedAt = this.now() + startBackoffMs(this.startFailures);
+    this.lastStartError = error;
+    throw error;
   }
 
   #appendLog(chunk) {

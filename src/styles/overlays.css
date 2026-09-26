@@ -1199,6 +1199,159 @@
 
 .setup-perm .setup-btn { margin-left: auto; }
 
+/* --- Phone & devices (Iris Link) --- */
+.link-status {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--text-soft);
+}
+
+.link-status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.link-status-dot.on {
+  background: var(--mint);
+  box-shadow: 0 0 8px rgba(var(--mint-rgb), 0.6);
+}
+
+.link-status-dot.off {
+  background: var(--coral);
+}
+
+.link-pair {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  margin: var(--s-3) 0 var(--s-4);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.028);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+.link-pair.expired {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-2);
+}
+
+.link-qr-tile {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 120px;
+  height: 120px;
+  padding: var(--s-2);
+  border-radius: var(--r-sm);
+  /* Solid light tile behind the QR so it keeps contrast and a clean quiet
+     zone on the dark theme, regardless of what's rendered behind it. */
+  background: #ffffff;
+}
+
+.link-qr {
+  width: 100%;
+  height: 100%;
+}
+
+.link-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.link-pair-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.link-code {
+  font-family: var(--font-mono);
+  font-size: var(--t-2xl);
+  font-weight: var(--w-semi);
+  letter-spacing: var(--tr-wide);
+  color: var(--cyan-bright);
+}
+
+.link-countdown {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--muted);
+}
+
+.link-devices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.link-empty {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--muted);
+}
+
+.link-device {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.028);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+.link-device-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: var(--r-xs);
+  color: var(--cyan-bright);
+  background: rgba(var(--cyan-rgb), 0.09);
+}
+
+.link-device-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-05);
+}
+
+.link-device-name {
+  font-size: var(--t-md);
+  font-weight: var(--w-medium);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-device-meta {
+  font-size: var(--t-xs);
+  color: var(--muted);
+}
+
+.link-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--coral);
+}
+
 .spin {
   animation: step-spin 0.7s linear infinite;
 }

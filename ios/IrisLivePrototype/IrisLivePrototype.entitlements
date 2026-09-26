@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- LINK_API.md §11.6. Without aps-environment there is no device token
+	     at all: registerForRemoteNotifications() fails and push is dead.
+	     `development` is the value every Xcode build wants; Xcode rewrites it
+	     to `production` when the app is exported for TestFlight or the App
+	     Store, and PushEnvironment.current derives the matching APNs host the
+	     same way, so the two never disagree. -->
+	<key>aps-environment</key>
+	<string>development</string>
+	<!-- Required for the `needs_attention` push's interruption-level
+	     "time-sensitive" to be honored; without it iOS silently demotes the
+	     notification and Focus swallows it. Completions use "active" and do
+	     not need this. -->
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
+	<!-- LINK_API.md §14.7. The widget extension is a separate process with a
+	     separate Keychain access group, so it cannot read the pairing
+	     credential — and must not be handed one. The app fetches
+	     GET /link/summary and writes a small NON-SECRET snapshot (counts, two
+	     titles, a flag) into this container; the extension only reads it.
+	     That is the only thing this group is for. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.app.iris.liveprototype</string>
+	</array>
+</dict>
+</plist>

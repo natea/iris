@@ -1,0 +1,1807 @@
+# Iris Link API — the contract the phone implements
+
+This document is the complete contract between the Iris desktop app (macOS,
+Electron) and a paired phone. It is written so the phone can be built without
+reading the desktop's source: every route, every error code, every tool the
+model will call, the exact JSON the phone must return for each one, the exact
+text of the system events it must inject, the dispatch gate it must enforce,
+and the announced/undelivered protocol.
+
+Desktop sources of truth, for anyone who does want to read them:
+`electron/irisLinkServer.mjs` (routes), `electron/mobileSession.mjs` (the
+config baked into the token), `electron/hermesTools.mjs` (tool schemas),
+`electron/hermesGate.mjs` (the gate), `electron/main.mjs` (`mintGeminiToken`,
+`submitHermesTask`, `executeTool`), `electron/hermesEvents.mjs` (the
+completion event text).
+
+---
+
+## 1. Transport and authentication
+
+Iris Link runs inside the desktop app, bound **only** to the Mac's Tailscale
+address. It is off unless `IRIS_LINK_ENABLED=1`. Default port `8765`.
+
+- **Base URL**: `http://<tailscale-host>:<port>` (the prototype; production
+  will serve HTTPS on the MagicDNS `*.ts.net` name — see design.md).
+- **Auth**: `Authorization: Bearer <device credential>` on every request
+  except `POST /link/pair`.
+- **Bodies**: JSON only. A `Content-Type` other than `application/json` on a
+  POST is refused with **415 `unsupported_media_type`**. Bodies over **64 KiB**
+  are refused with **413 `payload_too_large`**.
+- **Responses**: always JSON, always `Cache-Control: no-store`,
+  `X-Content-Type-Options: nosniff`. There is no CORS. Errors are always
+  `{"error": "<code>"}`, sometimes with a `"message"` string (never a
+  credential, key, or token).
+- **Timeouts**: headers 20 s, request 60 s, keep-alive 15 s. A proxied Hermes
+  call is aborted after 30 s (SSE streams are exempt).
+
+### Failures that apply to every authenticated route
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| 401 | `{"error":"not_paired"}` | Missing, malformed, or revoked bearer credential. The phone should re-pair; never retry silently in a loop. |
+| 404 | `{"error":"not_found"}` | Unknown path. |
+| 405 | `{"error":"method_not_allowed"}` | Right path, wrong method. |
+| 413 | `{"error":"payload_too_large"}` | Body over 64 KiB. |
+| 415 | `{"error":"unsupported_media_type"}` | Non-JSON `Content-Type`. |
+| 500 | `{"error":"internal_error"}` | Unexpected desktop-side failure. |
+| 501 | `{"error":"tasks_unavailable"}` | The desktop did not wire the task API (older build). Treat as "dispatch is unavailable from the phone", and say so. |
+
+---
+
+## 2. Pairing
+
+### `POST /link/pair` — unauthenticated
+
+Request: `{"secret": "<from the QR payload>", "deviceName": "Nate's iPhone"}`
+
+`200` → `{"deviceId": "...", "credential": "...", "code": "123456"}`
+
+The credential is returned **exactly once**. Store it in the Keychain with
+`WhenUnlockedThisDeviceOnly`. `code` is the six digits also shown on the Mac;
+show it so the user can compare.
+
+Errors: `400 offer_unknown` · `400 offer_used` · `400 offer_expired` ·
+`429 too_many_attempts` (the offer is burned; the user must create a new one) ·
+`429 rate_limited` (more than 10 pairing attempts per minute from one address) ·
+`400 invalid_json`.
+
+---
+
+## 3. Status and token
+
+### `GET /link/status`
+
+```json
+{
+  "ok": true,
+  "deviceId": "…",
+  "deviceName": "Nate's iPhone",
+  "hermesReachable": true,
+  "userName": "Nate",
+  "liveModel": "models/gemini-3.1-flash-live-preview",
+  "voice": "Zephyr",
+  "accent": ""
+}
+```
+
+`hermesReachable` is a **live** probe of Hermes, time-bounded to 2.5 s and
+cached for 5 s. If the probe times out the previous answer is returned rather
+than a guess. Poll this no more often than every few seconds.
+
+The phone must distinguish two different outages and say which one it is:
+the request failing at all = the **Mac/Link** is unreachable;
+`hermesReachable: false` = the Mac is up but **Hermes** is not.
+
+### `POST /link/gemini-token`
+
+Body: `{}`, or `{"resume_handle": "<a handle the phone was issued>"}`. `200` →
+
+```json
+{
+  "token": "auth_tokens/…",
+  "expiresAt": "ISO-8601",
+  "newSessionExpiresAt": "ISO-8601",
+  "model": "models/gemini-3.1-flash-live-preview",
+  "resumed": false
+}
+```
+
+`resume_handle` asks the desktop to mint a token that reconnects into an
+existing conversation, by putting the handle in the token's own
+`liveConnectConstraints.config.sessionResumption`. `resumed` says whether it
+did. **The phone cannot do this for itself** — see "Reconnecting into the same
+conversation" below. A desktop build that does not implement `resume_handle`
+ignores it and omits `resumed`, which the phone correctly reads as "this is a
+new conversation" and tells the user about.
+
+`502 token_unavailable` if the mint failed (no key configured, upstream error).
+
+- The token must be used to **start** a session before `newSessionExpiresAt`
+  (60 s) and the session may run until `expiresAt` (30 min). `uses: 1`.
+- Connect with **`v1alpha`** and pass the token as the API key.
+- **Send an empty setup config.** The token carries
+  `liveConnectConstraints.config`, which *replaces* whatever the client sends:
+  voice, transcription, system instruction and tool declarations all come from
+  the Mac. Anything the phone puts in its setup frame is silently ignored.
+- An **early** WebSocket close with code **1011** — before `setupComplete` —
+  is an authorization failure (expired/spent token), not a network blip. Mint a
+  new token; do not retry the same one. A 1011 *later*, under a session that
+  was working, is the token's `expireTime` and is reconnected through, not
+  reported (see "Reconnecting into the same conversation").
+
+### What the token's config contains (informational — do not send it)
+
+Verified accepted by the real token endpoint on 2026-09-19:
+
+```jsonc
+{
+  "responseModalities": ["AUDIO"],
+  "speechConfig": { "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": "Zephyr" } } },
+  "sessionResumption": {},          // accepted
+  "inputAudioTranscription": {},    // accepted
+  "outputAudioTranscription": {},   // accepted
+  "tools": [ { "googleSearch": {} }, { "functionDeclarations": [ … §5 … ] } ],
+  "systemInstruction": { "parts": [ { "text": "…" }, { "text": "USER CONTEXT …" } ] }
+}
+```
+
+Because `sessionResumption` is enabled, the server will send
+`sessionResumptionUpdate` messages: keep the newest `newHandle` where
+`resumable` is true. Because both transcription fields are set, the phone
+receives `inputTranscription` / `outputTranscription` — the input transcript is
+what the gate uses to observe the user's turn (§6).
+
+### Reconnecting into the same conversation
+
+A Live connection does not last. Two server-side deadlines end it, and the
+phone has to survive both:
+
+- a top-level **`goAway`** with a `timeLeft` (a protobuf Duration, e.g.
+  `"9.5s"`), followed by a hang-up. This is a connection rotation on a fixed
+  lifetime — roughly ten minutes — not a fault.
+- the token's own **`expireTime`** (30 min). Measured against the real API: the
+  server closes an otherwise healthy session with close code **1011**, reason
+  **"auth token has expired"**, exactly at `expireTime`.
+
+So **1011 alone does not mean the credential was refused.** It means that only
+before the session became usable (`setupComplete` never arrived, or it arrived
+moments ago) — that is the spent/expired/too-early token, e.g. `"Token has been
+used too many times"`. A 1011 under a session that has been running is a
+routine credential rotation, and the answer is a freshly minted token, not an
+ended conversation.
+
+How a handle is actually presented, all four points verified against the real
+API on 2026-09-19:
+
+1. A handle in the **phone's own setup frame is silently ignored** on the
+   constrained endpoint. The socket opens normally and the conversation is a
+   new one — indistinguishable from sending no handle at all, and from sending
+   a deliberately corrupted one. This is the same "the token's config REPLACES
+   the client's setup frame" rule that already applies to the voice, the prompt
+   and the tools. The **only** path that resumes is a handle baked into the
+   token's `liveConnectConstraints.config`, which is why the route above takes
+   `resume_handle`.
+2. A token is **single use even for a resume**. Offering an already-used token
+   a second time is refused with 1011 `"Token has been used too many times"`,
+   before `setupComplete`. Every reconnect mints a new token.
+3. A **new token can resume a handle issued under a previous token**.
+4. A handle **outlives the token it was issued under**: a session cut off by
+   its token's `expireTime` was resumed afterwards under a new token, with the
+   conversation intact.
+
+The phone therefore: keeps the newest resumable handle in memory (never on
+disk, never logged); on `goAway`, reconnects shortly before the deadline while
+the line is quiet; on an unexpected close, reconnects with backoff 0.5 s, 2 s,
+8 s, 32 s and then gives up with a plain message; and when the desktop answers
+`resumed: false`, starts a fresh session and says so via §7.1.
+
+---
+
+## 4. The task API
+
+All of these require the bearer credential. `:id` is a Hermes run id (a single
+path segment, ≤ 200 characters, no slashes or control characters).
+
+### `POST /link/tasks` — dispatch
+
+Request: `{"task": "<the complete brief>", "urgency": "low"|"normal"|"high"}`
+(`urgency` optional, defaults to `"normal"`).
+
+`200` →
+
+```json
+{
+  "status": "started",
+  "run_id": "…",
+  "message": "Hermes has started the task.",
+  "origin": "device:<deviceId>"
+}
+```
+
+This goes through the desktop's own dispatch path: the same pinned Hermes
+session, the same safety instructions, the same memory key, the same run
+registry, and a task card on the Mac.
+
+**The desktop's confirmation gate is not applied here and is not consumed by
+this call.** Link dispatch is trusted to have been gated on the phone. The
+phone MUST run the gate in §6 before ever calling this route.
+
+Errors: `400 task_required` (missing/blank) · `400 task_too_long` (> 20 000
+characters) · `400 invalid_urgency` · `400 invalid_json` ·
+`502 agent_unreachable` (the desktop could not reach Hermes) ·
+`502 dispatch_failed` (Hermes refused or returned no run id; `message` carries
+the reason) · `501 tasks_unavailable`.
+
+### `GET /link/tasks` — list
+
+`GET /link/tasks` → `{"tasks": [ … ]}`, most recently updated first (by
+`updated_at`), up to 50 entries, for the pinned Hermes session — **including runs dispatched from the desktop**.
+
+```json
+{
+  "run_id": "…",
+  "task": "…",
+  "status": "started|running|completed|failed|cancelled|…",
+  "origin": "desktop" | "device:<deviceId>",
+  "created_at": 1758240000000,
+  "updated_at": 1758240300000,
+  "announced_at": 0
+}
+```
+
+`created_at` / `updated_at` / `announced_at` are epoch milliseconds.
+Terminal statuses are `completed`, `failed`, `cancelled`, `canceled`, `error`.
+
+`GET /link/tasks?undelivered=1` → the same shape, filtered to runs that are
+**terminal**, dispatched by **this device**, and **not yet acknowledged**. See
+§8.
+
+### `GET /link/tasks/:id` — honest status
+
+`200` → the list entry above, merged with the live status from the same path
+the desktop uses:
+
+```json
+{
+  "run_id": "…", "task": "…", "origin": "…",
+  "status": "running",
+  "instructions": "The run is STILL IN PROGRESS. …"
+}
+```
+
+When the run is terminal the body also carries `"output": "…"`. When the
+desktop could not fetch the status it returns `"status": "error"` with an
+`"error"` string — report that verbatim, never a guessed status.
+
+`404 task_unknown` for an id the desktop has never seen.
+
+### `GET /link/tasks/:id/result` — the stored result
+
+`200` →
+
+```json
+{
+  "ok": true,
+  "run_id": "…",
+  "task": "…",
+  "status": "completed",
+  "output": "the complete stored Hermes output",
+  "instructions": "Answer only from this complete Hermes result."
+}
+```
+
+Errors: `404 task_unknown` · **`409 task_not_finished`** (the run has not
+reached a terminal status) · `404 result_unavailable` (terminal but the stored
+result could not be restored — say it is unavailable, never invent it).
+
+### `POST /link/tasks/:id/stop`
+
+Body: none. `200` → `{"status": "stopping", "run_id": "…"}`.
+Errors: `404 task_unknown` · `502 agent_unreachable`.
+
+### `POST /link/tasks/:id/approval`
+
+Body: `{"decision": "once"|"session"|"always"|"deny"}`.
+`200` → `{"status": "resolved", "run_id": "…", "decision": "once"}`.
+
+Errors: `400 invalid_decision` · `400 invalid_json` · `404 task_unknown` ·
+**`409 approval_not_pending`** (Hermes has no pending approval for that run —
+the desktop or a timeout already resolved it; tell the user plainly) ·
+`502 agent_unreachable`.
+
+> This route resolves the approval directly, exactly as the desktop's own
+> approval buttons do. **The phone is therefore responsible for the human
+> gate**: Iris must describe the command and reason, ask once / for this
+> session / always / deny, END ITS TURN, and only call this after the user has
+> answered in a turn of their own. Never call it from the same turn that
+> presented the question.
+
+> Hermes' *other* interactive prompts — clarification questions, sudo
+> passwords, secrets — travel over Hermes' interactive WebSocket, which Iris
+> Link does not carry. There is no route for them and the phone does not
+> declare `respond_hermes_interaction`. When a run needs one, say it needs
+> attention on the Mac.
+
+### `POST /link/tasks/:id/announced`
+
+Body: none. `200` → `{"ok": true, "run_id": "…"}`. `404 task_unknown`. See §8.
+
+### `/hermes/*` — the raw allowlisted proxy
+
+Still available, unchanged, for anything the task API does not cover (e.g. the
+SSE activity stream). The desktop attaches Hermes' shared key; the phone never
+sees it. Allowlist (method + path, `:id` = one segment):
+
+`GET /v1/capabilities` · `POST /v1/runs` · `GET /v1/runs/:id` ·
+`GET /v1/runs/:id/events` · `POST /v1/runs/:id/stop` ·
+`POST /v1/runs/:id/approval` · `GET /api/sessions` · `POST /api/sessions` ·
+`GET /api/sessions/:id/messages`.
+
+Anything else → `403 route_not_allowed`. Upstream failure →
+`502 agent_unreachable`.
+
+**Prefer the `/link/tasks` routes for dispatch and status.** A run created
+directly through `POST /hermes/v1/runs` bypasses the desktop's pinned session,
+its safety instructions and the run registry: it will have no origin, no task
+card, and the desktop may announce it aloud.
+
+---
+
+## 5. Tools the token declares
+
+The model is given `googleSearch` plus exactly these eight function
+declarations, in this order. Google Search is handled by the server; the phone
+never sees a tool call for it.
+
+Every tool result is returned as the function response `response` object. The
+`instructions` strings below are load-bearing — the model's behavior depends on
+them, and they are the desktop's own wording. **Return them verbatim.**
+
+### 5.1 `check_hermes_status`
+
+Args: none (`{}`).
+
+Call `GET /link/status`. Return:
+
+```json
+{ "reachable": true, "health": { "transport": "iris_link" } }
+```
+
+or, when `hermesReachable` is false or `/link/status` itself failed:
+
+```json
+{ "reachable": false, "error": "Hermes is not reachable from the Mac." }
+```
+
+(Use an error string that names which of the two is down.)
+
+### 5.2 `propose_hermes_task` — STEP 1, handled entirely on the phone
+
+Args (`goal` required):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `goal` | string | What the user wants Hermes to accomplish. |
+| `context` | string | Only context the user supplied or that was established in the conversation. |
+| `constraints` | string[] | User-supplied limits, deadlines, budgets, exclusions, safety requirements. |
+| `acceptance_criteria` | string[] | Observable conditions that make the work complete. |
+| `output_format` | string | Requested result format, if any. |
+| `urgency` | string enum | `low` \| `normal` \| `high`. |
+
+Build the brief with **exactly** this format (the desktop's
+`formatHermesBrief`) — sections joined by a blank line, omitted when empty, and
+list items prefixed with `- `:
+
+```
+Goal:
+<goal>
+
+User-provided context:
+<context>
+
+Constraints:
+- <constraint>
+
+Acceptance criteria:
+- <criterion>
+
+Expected output:
+<output_format>
+```
+
+Stage it in the gate (§6) and return:
+
+```json
+{
+  "status": "proposed",
+  "proposal_id": "<uuid>",
+  "task": "<the formatted brief>",
+  "instructions": "Now read this exact brief back to <UserName> in one or two short sentences, ask \"Should I send this to Hermes?\", and END YOUR TURN. Do NOT call submit_hermes_task yet — it will be rejected until they answer. Interpret <UserName>'s next response by meaning, not by matching specific words. If they clearly authorize sending, submit proposal_id \"<uuid>\". If they decline, call discard_hermes_proposal with that proposal_id. If they change any detail, call propose_hermes_task again and read back the replacement proposal. If their intent is ambiguous, ask one short natural clarification."
+}
+```
+
+(The three sentences above are joined with single spaces, exactly as shown.)
+
+If the brief is empty after formatting:
+
+```json
+{ "status": "error", "error": "A complete task brief is required." }
+```
+
+### 5.3 `submit_hermes_task` — STEP 2
+
+Args: `{ "proposal_id": "<string>" }` (required).
+
+1. Run the gate claim (§6).
+2. **Rejected** → return, with `error` chosen from the table in §6.4:
+
+```json
+{
+  "status": "blocked",
+  "error": "REJECTED: …",
+  "active_proposal_id": "<id or null>",
+  "instructions": "…"
+}
+```
+
+3. **Claimed** → `POST /link/tasks` with the claimed proposal's `task` and
+   `urgency`, then return:
+
+```json
+{
+  "status": "started",
+  "run_id": "…",
+  "origin": "device:…",
+  "message": "Hermes has started the task.",
+  "instructions": "Say ONE short acknowledgement (e.g. 'On it — Hermes is handling that now.'). The task has only STARTED: you have NO result yet. Do not describe, predict, or summarize any outcome until SYSTEM_EVENT_HERMES_COMPLETE arrives or get_hermes_task_status returns a terminal status."
+}
+```
+
+4. If the dispatch call itself fails, return the failure honestly — do not
+   claim it was sent:
+
+```json
+{
+  "status": "error",
+  "error": "<agent_unreachable | dispatch_failed | …>",
+  "instructions": "Say the task could not be sent and why. Do not claim Hermes is working on it."
+}
+```
+
+   A claimed proposal is consumed. After a failed dispatch the model must stage
+   a fresh proposal rather than retrying the same `proposal_id`.
+
+### 5.4 `discard_hermes_proposal`
+
+Args: `{ "proposal_id": "<string>" }` (required).
+
+Success:
+
+```json
+{
+  "status": "discarded",
+  "proposal_id": "…",
+  "instructions": "Acknowledge the decline briefly. Do not send this proposal to Hermes."
+}
+```
+
+Failure (`no_proposal`, `proposal_mismatch`, `session_mismatch`):
+
+```json
+{
+  "status": "blocked",
+  "error": "Could not discard the staged Hermes proposal: <reason>.",
+  "active_proposal_id": "<id or null>",
+  "instructions": "Do not claim that a different proposal was discarded."
+}
+```
+
+### 5.5 `get_hermes_task_status`
+
+Args: `{ "run_id": "<string>" }` (required).
+
+`GET /link/tasks/:id`. Return, mirroring the desktop:
+
+- Terminal status:
+  ```json
+  { "status": "completed", "run_id": "…", "output": "…",
+    "instructions": "The run is finished. Report ONLY what is in `output` above — nothing else." }
+  ```
+- Still running:
+  ```json
+  { "status": "running", "run_id": "…",
+    "instructions": "The run is STILL IN PROGRESS. There is NO result yet. Tell the user it is still working and stop there — do not guess, predict, or invent any findings. You will receive SYSTEM_EVENT_HERMES_COMPLETE when it finishes." }
+  ```
+- Could not fetch (network failure, `404 task_unknown`, `500`):
+  ```json
+  { "status": "error", "run_id": "…", "error": "<what happened>",
+    "instructions": "You could not fetch the status. Say exactly that. Do not make up a status or a result." }
+  ```
+
+### 5.6 `stop_hermes_task`
+
+Args: `{ "run_id": "<string>" }` (required). `POST /link/tasks/:id/stop`.
+
+```json
+{ "status": "stopping", "run_id": "…" }
+```
+
+On `404` / `502`, return `{ "status": "error", "run_id": "…", "error": "…" }`.
+
+### 5.7 `approve_hermes_action`
+
+Args: `{ "run_id": "<string>", "choice": "<once|session|always|deny>" }`, both
+required.
+
+Only call after the human gate described under `POST /link/tasks/:id/approval`.
+If the user has not answered in their own turn, the phone must refuse locally:
+
+```json
+{
+  "status": "blocked",
+  "error": "The user's latest complete response does not explicitly authorize that approval choice.",
+  "instructions": "Ask whether to allow this once, for this session, always, or deny it; end your turn and wait."
+}
+```
+
+Otherwise `POST /link/tasks/:id/approval` and return:
+
+```json
+{ "status": "resolved", "run_id": "…", "choice": "once" }
+```
+
+`409 approval_not_pending` →
+`{ "status": "blocked", "error": "Hermes has no pending approval for this run." }`
+
+### 5.8 `read_hermes_task_result`
+
+Args: `{ "run_id": "<string>" }` — **required on the phone** (the desktop's
+version can infer it from what is on screen; there is no screen here).
+
+`GET /link/tasks/:id/result`. Success:
+
+```json
+{
+  "ok": true, "run_id": "…", "task": "…", "status": "completed",
+  "output": "…",
+  "instructions": "Answer only from this complete Hermes result."
+}
+```
+
+`409 task_not_finished`:
+
+```json
+{ "ok": false, "run_id": "…", "error": "That Hermes run has not finished.",
+  "instructions": "Say it is still working; do not invent a result." }
+```
+
+`404 task_unknown` / `404 result_unavailable`:
+
+```json
+{ "ok": false, "run_id": "…", "error": "The selected Hermes result could not be restored.",
+  "instructions": "Say the result is unavailable; do not invent its contents." }
+```
+
+### Tools deliberately NOT declared
+
+`respond_hermes_interaction` (no transport for it — §4), every Iris UI tool
+(`control_iris_ui`, `get_iris_ui_context`), the brain/neural-map tools
+(`search_brain`, `search_memory`, `read_memory_note`), and `go_to_sleep`. If
+the model asks for something in these areas it will simply talk about it; the
+system instruction tells it to say that it needs the Mac.
+
+---
+
+## 6. The dispatch gate (reimplement in Swift)
+
+Port of `electron/hermesGate.mjs`. One proposal exists at a time, globally.
+
+### 6.1 State
+
+```
+proposal: { id: UUID, task: String, urgency: String, sessionId: String,
+            stage: Stage, proposedAt: Date,
+            userResponse: String, userTurnObserved: Bool }?
+
+Stage = awaiting_readback | awaiting_user | readback_interrupted
+```
+
+TTL: **5 minutes** from `proposedAt`. Every read expires a stale proposal
+first, so an expired proposal behaves exactly like `no_proposal`.
+
+### 6.2 Transitions
+
+| Event | Effect |
+| --- | --- |
+| `propose(task, urgency)` — non-empty task | Replaces any existing proposal with a new one, `stage = awaiting_readback`, `userTurnObserved = false`. Empty task → `{ok:false, reason:"empty_task"}`, proposal untouched. |
+| Model turn completes (`turnComplete` with no barge-in) | `awaiting_readback → awaiting_user`. Any other stage: no-op. |
+| Model turn interrupted (barge-in / `interrupted`) | `awaiting_readback → readback_interrupted`. Any other stage: no-op. A barge-in does not prove the brief was heard. |
+| User turn observed (final input transcript, non-empty) | Records `userResponse`, sets `userTurnObserved = true`. Refused with `not_awaiting_user` when no proposal is staged or the stage is `readback_interrupted`; refused with `readback_in_progress` while still `awaiting_readback`; refused with `empty_response` for blank text. |
+| `discard(proposalId)` | Clears the proposal when the id matches. |
+| `claim(proposalId)` | Consumes the proposal — see below. |
+| Session reset (fresh Live session, not a resume) | Clear the proposal. |
+
+`urgency` is normalized to `low` / `normal` / `high`; anything else becomes
+`normal`.
+
+### 6.3 Claim rules
+
+`claim` succeeds only when **all** hold, and it clears the proposal on success:
+
+1. A proposal exists (not expired).
+2. `proposalId` matches exactly.
+3. `stage == awaiting_user`.
+4. `userTurnObserved == true`.
+
+### 6.4 Rejection reasons → what the tool returns
+
+| Reason | `error` | `instructions` |
+| --- | --- | --- |
+| `no_proposal` | `REJECTED: no active proposal. Stage and read back a complete brief first.` | `Do not claim the task was sent.` |
+| `proposal_mismatch` | `REJECTED: proposal_id does not match the exact brief shown to the user.` | With an active proposal: `Do not restage or repeat the readback. Retry submit_hermes_task using active_proposal_id if this is the proposal the user just confirmed.` Otherwise: `Do not claim the task was sent.` |
+| `session_mismatch` | `REJECTED: the selected Hermes chat changed. Stage and confirm the brief again.` | `Do not claim the task was sent.` |
+| `readback_interrupted` | `REJECTED: the proposal read-back was interrupted. Stage it again and let the full read-back finish before asking for confirmation.` | `Call propose_hermes_task with the corrected brief.` |
+| `no_user_turn` | `REJECTED: no distinct response from <UserName> was observed after the proposal read-back.` | `Keep the same proposal staged, end your turn, and wait for the user's response. If their response was not captured, ask one brief natural clarification. Never demand specific confirmation wording.` |
+
+Always include `"active_proposal_id": <current proposal id or null>`.
+
+### 6.5 The settle window
+
+The desktop waits briefly before claiming, because the model can call
+`submit_hermes_task` a few milliseconds before the user's final transcript
+lands. Mirror it: when the stage is `awaiting_readback` or `awaiting_user` and
+`userTurnObserved` is still false, poll every **40 ms** for up to **1.6 s**
+before evaluating the claim. This turns a benign race into a success instead of
+a spurious `no_user_turn`.
+
+### 6.6 What the gate is not
+
+The gate enforces *ordering and identity*, not vocabulary. It never matches on
+"yes" or "do it". The model decides what the user meant and expresses that by
+calling `submit_hermes_task` or `discard_hermes_proposal`.
+
+---
+
+## 7. System events the phone injects
+
+Send these as a client text turn (`clientContent`, role `user`,
+`turnComplete: true`) — the same mechanism the desktop uses.
+
+### 7.1 Session start
+
+Send once, when the session is ready and before the user has spoken. Skip it if
+the user has already started a turn, and skip it on a resumed session.
+
+```
+SYSTEM_EVENT_SESSION_START: Greet <UserName> once in one short sentence, then ask what they have in mind. Do not report service status unless asked.
+```
+
+(One line; `<UserName>` is `userName` from `/link/status`.)
+
+### 7.2 Hermes completion
+
+Send when a run dispatched by this phone reaches a terminal status. Exact
+template (`\n`-joined):
+
+```
+SYSTEM_EVENT_HERMES_COMPLETE
+run_id: <runId>
+status: <status>
+instructions_to_iris:
+- Tell <UserName> Hermes has returned and summarize the authoritative result below in 1-3 sentences.
+- Preserve explicit counts, names, and quantities exactly; if unsure, omit them rather than infer.
+- Ask whether to review the details. Do not claim you performed Hermes's work.
+authoritative_hermes_result:
+<output>
+```
+
+- When the session had to be (re)started specifically to deliver this result,
+  insert this line immediately after the "Ask whether to review the details…"
+  line:
+  `- Iris was woken for this result. Deliver it directly without a greeting.`
+- When the run produced no text, `<output>` is exactly
+  `(Hermes returned no text output.)`
+- `<output>` is the run's `output`, or its `error` when it failed. The status
+  line carries the failure; do not dress it up.
+
+---
+
+## 8. The announced / undelivered protocol
+
+The problem: a completion must never be lost, and never announced twice, across
+backgrounding, reconnects, and a dropped session mid-sentence.
+
+The desktop records who dispatched each run (`origin`). **A run dispatched by a
+phone is never spoken by the desktop and never wakes the Mac** — it only
+appears as a task card there. The phone owns announcing it, and the desktop
+keeps the ledger.
+
+Phone loop:
+
+1. On connect, on foreground, and after any reconnect:
+   `GET /link/tasks?undelivered=1`.
+2. For each entry (oldest first): fetch the result with
+   `GET /link/tasks/:id/result` and inject the `SYSTEM_EVENT_HERMES_COMPLETE`
+   turn from §7.2.
+3. **Only after the announcement has actually been delivered** — the model's
+   turn containing it completed — `POST /link/tasks/:id/announced`.
+4. If the session drops, the app is killed, or the user barges in before the
+   announcement completes, do **not** acknowledge. Step 1 will return it again
+   on the next session, which is exactly the "Announcement interrupted"
+   scenario in the dispatch contract. A *reconnect* is this case too: the
+   announcement being spoken when the socket died goes back to the front of the
+   queue and is delivered again on the new connection — once, not twice, and
+   never acknowledged in between.
+
+An acknowledged run never reappears in the undelivered list. Acknowledging an
+unknown id returns `404 task_unknown`; this is safe to ignore.
+
+---
+
+## 9. Polling guidance
+
+There is no push. Iris Link exposes state; the phone decides when to look.
+
+| Situation | Cadence |
+| --- | --- |
+| A run is active and the app is in the foreground | `GET /link/tasks/:id` every **2 s** (the desktop's own interval). |
+| Any request fails | Back off: 1 s, 2 s, 4 s, … capped at **30 s**. Keep the run marked "still working"; never downgrade it to failed because *polling* failed. |
+| Terminal status observed | Stop polling that run immediately. |
+| App backgrounded / resumed | Stop per-run polling; on resume do one `GET /link/tasks` and one `GET /link/tasks?undelivered=1`. |
+| No run active | `GET /link/status` no more often than every 5 s (the reachability probe is cached for 5 s anyway). |
+| `401 not_paired` | Stop all polling and surface re-pairing. Do not retry in a loop. |
+
+For live activity while foregrounded, `GET /hermes/v1/runs/:id/events` streams
+Hermes' SSE through the proxy. It is additive telemetry only — status and
+completion must still come from the polling above, exactly as on the desktop.
+
+---
+
+## 10. Behavior the contract requires of the phone
+
+From `openspec/.../agent-dispatch-contract`:
+
+- **Two-step dispatch**: §6, enforced in code — not merely in the prompt.
+- **Self-contained briefs**: §5.2 — the brief stands alone; Hermes cannot hear
+  the conversation.
+- **No invented run state**: §5.5 / §5.8 — speak only from a fetched status or
+  a fetched result.
+- **Non-blocking dispatch**: `POST /link/tasks` returns a `run_id` immediately;
+  the conversation continues while the run works.
+- **Proactive completion announcement**: §8, including failures stated plainly.
+- **Single pinned agent session**: guaranteed by the desktop — the phone must
+  never pass a session id, and must not create runs through
+  `POST /hermes/v1/runs`.
+- **Secure handling of interaction requests**: approvals through §5.7;
+  clarifications, sudo and secrets are refused with "needs attention on the
+  Mac" and never spoken.
+
+---
+
+## 11. Push notifications
+
+There *is* push, and it comes from the Mac. The desktop signs an ES256
+provider JWT with the team's `.p8` key (kept in `~/.iris`, never sent to a
+phone) and posts straight to Apple over HTTP/2 — no relay, no third party.
+§9's "there is no push" applies to everything except the two notifications
+below; polling is still how the phone learns anything else.
+
+`GET /link/status` carries `"pushConfigured": true|false` — whether this Mac
+can push at all. It is a boolean and nothing else. When it is `false`,
+registering still succeeds but no notification will ever arrive; say so rather
+than promising alerts.
+
+### 11.1 `PUT /link/push-token` — register
+
+Request: `{"token": "<APNs device token, hex>", "environment": "sandbox"|"production"}`
+
+`200` → `{"ok": true, "pushEnabled": true, "environment": "sandbox"}`
+
+Idempotent, and there is exactly **one token per paired device**: registering
+again replaces whatever was stored. The token is written next to the device's
+credential hash in the desktop's `devices.json`, is never returned by any
+route, and is deleted when the device is revoked.
+
+Errors: `400 invalid_token` (not hex, or not a plausible length) ·
+`400 invalid_environment` · `400 invalid_json` · `415` for a non-JSON
+`Content-Type` · `401 not_paired` · `405 method_not_allowed`.
+
+### 11.2 `DELETE /link/push-token` — unregister
+
+Body: none. `200` → `{"ok": true, "pushEnabled": false}`. Safe to call when
+nothing is registered. Call it when the user turns notifications off in Iris.
+
+### 11.3 What the phone must do
+
+1. Ask for notification authorization, then register with APNs and `PUT` the
+   token **after the user grants permission** — and again on every
+   `didRegisterForRemoteNotificationsWithDeviceToken`, because iOS can issue a
+   new token after a restore, a reinstall, or an OS update. Re-`PUT` on every
+   launch as well: it is idempotent and costs one request.
+2. **Derive `environment` from the build, not from a setting.** A token minted
+   under the development entitlement only works against Apple's sandbox host
+   and vice versa; sending to the wrong host returns `BadDeviceToken` and the
+   Mac drops the token.
+   - Debug / run-from-Xcode → `"sandbox"` (`aps-environment: development`)
+   - TestFlight / App Store → `"production"` (`aps-environment: production`)
+   The conventional derivation is `#if DEBUG` → sandbox, else check whether the
+   receipt URL ends in `sandboxReceipt` (TestFlight still uses the production
+   APNs host, so TestFlight → `"production"`).
+3. On tap, read `run_id` from the payload and open **that run** — fetch
+   `GET /link/tasks/:id` and, if terminal, `GET /link/tasks/:id/result`. Never
+   speak a result from the notification body; it does not contain one.
+4. Keep acking with `POST /link/tasks/:id/announced` (§8). The ack is what
+   suppresses a duplicate push: the desktop waits **6 seconds** after a
+   phone-dispatched run finishes before pushing, and skips the push entirely if
+   the ack has landed by then. A phone that is in a live session therefore
+   announces the result itself and the user gets no banner; a phone that is
+   asleep gets the banner.
+5. Foreground presentation is the phone's choice, but a run the user is already
+   hearing about should not also banner.
+
+### 11.4 The two payloads
+
+Both are alert pushes (`apns-push-type: alert`, priority 10) with
+`apns-collapse-id` set, so a repeat for the same run replaces the old banner
+rather than stacking. Neither ever contains Hermes' output: a lock screen shows
+notifications, so the body is the task title only, shortened to ~110
+characters.
+
+**A run this phone dispatched finished** — sent once per run, `apns-collapse-id`
+= the run id:
+
+```json
+{
+  "aps": {
+    "alert": { "title": "Hermes finished", "body": "<short task title>" },
+    "sound": "default",
+    "thread-id": "<run id>",
+    "interruption-level": "active"
+  },
+  "run_id": "<run id>",
+  "kind": "run_complete"
+}
+```
+
+The title is the run's **real** terminal status: `Hermes finished`
+(`completed`), `Hermes couldn't finish` (`failed` / `error`), or
+`Hermes was stopped` (`cancelled` / `canceled`). Do not restate it as success.
+
+**A run this phone dispatched is waiting on the user** — sent at most once per
+distinct pending request (a repeated poll of the same request does not push
+again; a *different* request on the same run does):
+
+```json
+{
+  "aps": {
+    "alert": { "title": "Hermes needs you", "body": "<short task title> — Open Iris to approve or deny it." },
+    "sound": "default",
+    "thread-id": "<run id>",
+    "interruption-level": "time-sensitive"
+  },
+  "run_id": "<run id>",
+  "kind": "needs_attention",
+  "request_id": "<opaque id for this pending request>",
+  "can_approve_from_phone": true
+}
+```
+
+When `can_approve_from_phone` is `false` the body says it needs an answer on
+the Mac — that is a Hermes interaction (clarification, sudo, secret), which
+Iris Link does not carry (§4). Say it needs the Mac; do not offer to approve
+it.
+
+`interruption-level: "time-sensitive"` breaks through Focus and requires the
+**Time Sensitive Notifications** capability in the app's entitlements;
+completions use `"active"` and do not.
+
+### 11.5 `pending_approval` on the task API
+
+`GET /link/tasks/:id` and every entry of `GET /link/tasks` now carry:
+
+```json
+"pending_approval": {
+  "request_id": "approval:9f3c…",
+  "summary": "Hermes wants to run: rm -rf build",
+  "can_approve_from_phone": true
+}
+```
+
+or `null` when nothing is pending. It is sourced from the desktop's real run
+state — an approval Hermes actually asked for, or an interactive prompt that
+Link cannot carry — never from a guess. `request_id` matches the one in a
+`needs_attention` payload for the same request, so a push and a poll can be
+reconciled. A secret prompt never has its question repeated here; the summary
+says only that a credential must be entered on the Mac.
+
+`can_approve_from_phone: true` means §5.7 applies: describe it, **end the
+turn**, and only call `POST /link/tasks/:id/approval` after the user has
+answered in a turn of their own. The push is a nudge, never authorization.
+
+### 11.6 iOS capabilities required
+
+- **Push Notifications** capability, i.e. an `aps-environment` entitlement
+  (`development` for Xcode builds, `production` for TestFlight/App Store).
+  Without it, `registerForRemoteNotifications()` fails and there is no token.
+- **Time Sensitive Notifications** capability for
+  `interruption-level: "time-sensitive"` to be honored.
+- **No background mode is needed.** Plain alert pushes are displayed by the
+  system; the app does not have to be running and does not need
+  `remote-notification` in `UIBackgroundModes`. (That mode is only for silent
+  content-available pushes, which Iris does not send.)
+- Revoking the device on the Mac deletes its token along with its credential,
+  so a revoked phone stops receiving pushes immediately. A token Apple reports
+  as `Unregistered` or `BadDeviceToken` is dropped by the desktop; the phone
+  re-registers to start receiving again.
+
+---
+
+## 12. Live progress
+
+The desktop task card shows what Hermes is doing *right now*: a headline
+("Running code"), a step count, and a list of steps with a tool name, a short
+preview, a duration and a done/running state. That view used to exist only in
+the renderer. `electron/runSteps.mjs` now accumulates the same steps in the
+main process from the same normalized Hermes events, so the task API can serve
+them to the phone. Desktop source of truth: `electron/runSteps.mjs`
+(accumulator + redaction), `src/lib/tasks.ts` + `src/components/WorkCard.tsx`
+(the rules it is a port of, pinned by `test/runSteps.test.mjs`).
+
+**Truthfulness.** Only real events are reported. A run that has produced no
+events has `"steps": []`, `"step_count": 0` and `"headline": ""`. The desktop
+never invents progress, and neither should the phone: with an empty headline,
+show the run's status, not a guess.
+
+### 12.1 `GET /link/tasks` — list entries
+
+Every entry in §4's list gains exactly two fields — the list must stay small,
+so the step list itself is **never** included here:
+
+```json
+{
+  "run_id": "…", "task": "…", "status": "running", "…": "…",
+  "headline": "Running code",
+  "step_count": 7
+}
+```
+
+### 12.2 `GET /link/tasks/:id` — the full block
+
+The detail response gains the two fields above plus:
+
+```json
+{
+  "run_id": "run-8f21", "status": "running",
+  "headline": "Running code",
+  "step_count": 3,
+  "steps_cursor": 5,
+  "steps_complete": true,
+  "steps_truncated": false,
+  "steps": [
+    {
+      "id": "s1",
+      "index": 1,
+      "tool": "Terminal",
+      "category": "code",
+      "label": "osascript <<'EOF' tell applica…",
+      "preview": "osascript <<'EOF' tell application \"Finder\"",
+      "status": "done",
+      "started_at": 1758240301000,
+      "duration_ms": 1200
+    },
+    {
+      "id": "s3",
+      "index": 3,
+      "tool": "web_search",
+      "category": "search",
+      "label": "example.com",
+      "preview": "https://www.example.com/search?q=hermes",
+      "status": "running",
+      "started_at": 1758240304000,
+      "duration_ms": null
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `headline` | One line for "what is happening now", in the desktop's own wording: `Running code`, `Searching example.com`, `Browsing news.ycombinator.com`, `Working on plan.md`, `Using weather lookup`. When steps exist but none is running it is `Thinking…`. When nothing has been recorded it is `""`. |
+| `step_count` | How many steps are currently retained for the run (at most 60). |
+| `steps[].id` | Stable within the run, e.g. `"s3"`. Use it as a list identity. |
+| `steps[].index` | The step's creation position — the number inside `id`. Steps arrive in ascending `index` order. |
+| `steps[].tool` | The raw Hermes tool name. |
+| `steps[].category` | One of `browser`, `search`, `code`, `file`, `tool` — see §12.5. |
+| `steps[].label` | The short secondary detail the desktop shows beside the tool name: a host for URLs, a filename for file tools, a one-line snippet (≤ 64 chars) otherwise. May be `""`. |
+| `steps[].preview` | The sanitized, redacted, ≤ 200-char raw preview. May be `""`. Display it as untrusted text; never execute or follow it. |
+| `steps[].status` | `running`, `done` or `failed`. |
+| `steps[].started_at` | Epoch **milliseconds**. |
+| `steps[].duration_ms` | Integer milliseconds, or `null` while the step is running. Render like the desktop: `1.2s`. |
+| `steps_cursor` | The value to send as `steps_since` on the next poll. |
+| `steps_complete` | See §12.4. |
+| `steps_truncated` | `true` when older steps were dropped by the 60-step bound. |
+
+### 12.3 `?steps_since=` — fetch only what changed
+
+```
+GET /link/tasks/run-8f21?steps_since=5
+```
+
+- Send the `steps_cursor` from the previous response. A step **id** (`s5`)
+  works too: ids and cursors come from one per-run counter.
+- The response contains only steps that were **created or changed** since that
+  cursor — a step that merely finished comes back again, with its new `status`
+  and `duration_ms`. Merge by `id`: replace a step you already hold, append one
+  you do not.
+- `step_count`, `headline`, `steps_cursor` and the flags always describe the
+  **whole** run, not the delta.
+- Omit the parameter (or send something unparseable) to get the full retained
+  list. Do that on first load and after any error.
+
+### 12.4 `steps_complete`
+
+`true` only when Iris can vouch that the list is the whole story. It is
+`false` when:
+
+- nothing has been recorded for that run yet, **or**
+- Iris was restarted while the run was in flight — the steps live in memory
+  only, so they are simply gone, **or**
+- older steps were evicted by the 60-step bound (`steps_truncated: true`).
+
+On `false` with an empty `steps`, say so plainly: *"Iris doesn't have the step
+history for this run — it's still working."* Never imply the run did nothing.
+Status, output and completion are unaffected; they come from §4 as always.
+
+### 12.5 Categories → SF Symbols
+
+Mirror the desktop's icons:
+
+| `category` | Desktop icon | SF Symbol |
+| --- | --- | --- |
+| `browser` | Globe | `globe` |
+| `search` | Search | `magnifyingglass` |
+| `code` | Code2 | `chevron.left.forwardslash.chevron.right` |
+| `file` | FileText | `doc.text` |
+| `tool` | Cpu | `cpu` |
+
+Step status: `running` → a spinner or pulsing dot · `done` →
+`checkmark` · `failed` → `xmark`.
+
+### 12.6 Polling cadence
+
+Live progress adds no new route, so §9 still governs. Concretely:
+
+| Situation | Cadence |
+| --- | --- |
+| A run detail screen is open and the run is active | `GET /link/tasks/:id?steps_since=<cursor>` every **2 s** (the same request that already carries status — do not poll twice). |
+| A run list is on screen | `GET /link/tasks` every **5 s**. `headline` + `step_count` are enough for a list row; never fetch each run's detail to fill a list. |
+| Backgrounded | Stop. On resume, one full `GET /link/tasks/:id` **without** `steps_since` to resynchronize. |
+| Terminal status observed | One last fetch (to capture the final step states), then stop. |
+| Any failure | Back off per §9 and keep the steps you already have; a failed poll is not a step that failed. |
+
+Steps for a finished run stay answerable for about **10 minutes**, then are
+evicted and the run reports `steps_complete: false`. Fetch the result (§4)
+rather than relying on steps after that.
+
+---
+
+## 13. Voice selection and preview
+
+This section is additive to §3. `POST /link/gemini-token` now accepts an
+optional JSON body; sending none (or `{}`) is exactly today's behavior.
+
+### 13.1 `POST /link/gemini-token` — request body
+
+```json
+{ "voice": "Algenib", "purpose": "preview" }
+```
+
+Both fields are optional and independent.
+
+- `voice` — a name from the catalogue in `GET /link/status` → `voices`
+  (§13.3), matched **case-insensitively** and normalized to the catalogue's
+  canonical casing server-side. Omit it to get the desktop's configured
+  default (`default_voice` in `GET /link/status`). An unknown name is refused
+  with `400 { "error": "invalid_voice" }` — never sent through to the model.
+- `purpose` — `"session"` (default) or `"preview"`. Unknown values are refused
+  with `400 { "error": "invalid_purpose" }`.
+
+`200` response (adds two fields to what §3 documents):
+
+```json
+{
+  "token": "auth_tokens/…",
+  "expiresAt": "ISO-8601",
+  "newSessionExpiresAt": "ISO-8601",
+  "model": "models/gemini-3.1-flash-live-preview",
+  "voice": "Algenib",
+  "purpose": "preview"
+}
+```
+
+`voice` is the voice actually baked into the token (the normalized name, or
+the default when none was requested). `purpose` echoes what was minted.
+
+### 13.2 What a `purpose:"session"` token changes
+
+Nothing about the contract in §3 changes except that the voice can now be
+chosen: the token's config still carries the full Hermes-capable Iris (tools,
+personal context, dispatch gate, everything in §5–§7), just with
+`speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName` set to the requested
+(or default) voice, and the configured accent instruction folded into the
+system instruction as before.
+
+**The chosen voice applies from the next new session, not the current one.**
+A live session keeps the voice it was started with — asking the desktop for a
+different voice does not change how the current conversation sounds. To hear
+a new voice in real use, disconnect (or let the session end) and start a new
+one with a fresh `purpose:"session"` token for that voice.
+
+### 13.3 `GET /link/status` — new fields
+
+`GET /link/status` (§3) now also returns:
+
+```json
+{
+  "voices": [
+    { "name": "Zephyr", "style": "Bright" },
+    { "name": "Algenib", "style": "Gravelly" }
+  ],
+  "default_voice": "Zephyr",
+  "accent": "British (RP, London)"
+}
+```
+
+- `voices` — the full catalogue (30 entries) for building a picker: show
+  `"<name> · <style>"`.
+- `default_voice` — the name a `purpose:"session"` token gets when the phone
+  sends no `voice`. This is what a real session sounds like today; it is also
+  a sane initial selection the first time the phone has no locally-stored
+  choice.
+- `accent` — the desktop's configured accent as a **display label** (e.g.
+  `"British (RP, London)"`, or `"Custom: …"` for free text), `""` when none is
+  configured. Every preview and every real session already speaks with this
+  accent baked in; there is no separate accent parameter to send.
+
+### 13.4 The phone's voice, stored locally
+
+The phone stores its chosen voice locally (e.g. `UserDefaults`) and sends it
+as `voice` on **every** `purpose:"session"` token request from then on. There
+is no server-side per-device voice preference — if the phone sends no
+`voice`, it gets `default_voice`. Seed the local choice from `default_voice`
+on first run / first successful `GET /link/status`.
+
+### 13.5 Previewing a voice
+
+A preview is an ordinary Gemini Live connection, opened exactly like a real
+session (§3: `v1alpha`, token as the API key, **empty setup config** — the
+token's config replaces it here too), except:
+
+1. Mint a token with `{"voice": "<candidate>", "purpose": "preview"}`.
+2. Connect with that token.
+3. Send **one** text turn — the content does not matter, the preview config
+   ignores it and always answers with the fixed sample line, but send exactly
+   `"Go."` so behavior stays predictable across the model's input handling:
+   ```
+   session.sendRealtimeInput(text: "Go.")
+   ```
+4. Play the audio parts as they arrive; stop and close the session as soon as
+   `serverContent.turnComplete` is seen. The reply is one short fixed line
+   (name of the voice + a sample sentence) with the configured accent, so this
+   is a few seconds of audio, not an open-ended conversation.
+5. Close the session. Do not reuse a preview token or reconnect with it —
+   it is `uses: 1` and short-lived (token expires in 2 minutes; the new-session
+   window is 30 s), and it carries none of the real session's tools or
+   context, so nothing else useful can be done with it anyway.
+
+**Previews must not run while a real session is live.** Do not open a preview
+connection while the phone already has an active `purpose:"session"`
+WebSocket — they are two separate Live connections and would compete for the
+same audio I/O and the same visible "Iris is listening" state. Gate the
+preview UI on the same "no live session" check the dispatch gate (§6) already
+needs, and if a preview is requested mid-session, refuse it locally rather
+than asking the server.
+
+A preview token's config is intentionally minimal: `AUDIO` response modality
+only, the requested voice, `outputAudioTranscription` on (so the sample text
+can be shown as a caption), and **no** `tools`, **no** personal/user context,
+and **no** Hermes surface of any kind. A phone that connects with an empty
+setup frame on a preview token gets only the fixed sample line — never a
+capability the real session has.
+
+---
+
+## 14. Live Activity and widget
+
+"A live widget on the home screen so you can monitor what Hermes is doing in
+the background" is two separate iOS features, and the phone needs both:
+
+- a **Live Activity** — Lock Screen and Dynamic Island, real-time, driven by
+  ActivityKit pushes from this Mac;
+- a **WidgetKit home-screen widget** — a glance, refreshed by iOS on *its*
+  budget, fed by one cheap route (§14.6). A widget is **not** real-time and
+  must never pretend to be.
+
+Desktop source of truth: `electron/liveActivityNotifier.mjs` (what is sent and
+when), `electron/apnsClient.mjs` (headers), `electron/pairingStore.mjs`
+(tokens), `electron/irisLinkServer.mjs` (routes).
+
+### 14.1 One summary activity per device
+
+The phone runs **one** Live Activity, a summary of everything Hermes is doing,
+not one activity per run.
+
+Why: the question being answered is "what is Hermes doing", which is one
+ongoing answer; iOS caps how many activities an app may run at once and shows
+exactly one in the Dynamic Island regardless; and one activity means one
+update token and one coalescing window, which is what keeps the Mac inside
+Apple's per-hour ActivityKit budget when Hermes emits many events a second.
+
+The trade-off is detail: a summary cannot show one run's whole step list. It
+does not have to — §12 already serves that over `GET /link/tasks/:id`, and the
+activity's job is to be glanceable and true. `ContentState.runs` carries up to
+**3** active runs so parallel work is still visible.
+
+The activity covers **all** active runs in the desktop's Hermes session,
+whether the Mac or this phone dispatched them. Only a **device-origin** run
+can cause a *push-to-start* (§14.4); a desktop run never starts an activity
+uninvited, but it does appear in one that already exists.
+
+### 14.2 `ContentState` — the exact schema
+
+This is the single source of truth for both sides. The Swift `ContentState`
+must decode **exactly** this: same key names, same casing, same types, every
+field always present. Apple: *"don't use any custom JSON encoding strategies
+to encode your data, because the system always decodes JSON payloads for Live
+Activity updates using its default encoding strategies. Custom encoding
+strategies will result in update failures."*
+
+```swift
+struct IrisRunActivityAttributes: ActivityAttributes {
+    // Static; set once when the activity starts and never changed.
+    let title: String       // always "Hermes"
+    let macName: String     // this Mac's host name, e.g. "studio"
+    let deviceId: String    // the paired device id this activity belongs to
+
+    struct ContentState: Codable, Hashable {
+        let status: String
+        let headline: String
+        let title: String
+        let detail: String
+        let stepCount: Int
+        let stepsKnown: Bool
+        let activeRunCount: Int
+        let needsAttention: Bool
+        let attentionSummary: String
+        let runs: [RunLine]
+        let startedAt: Double
+        let updatedAt: Double
+    }
+
+    struct RunLine: Codable, Hashable {
+        let id: String
+        let title: String
+        let status: String
+        let headline: String
+    }
+}
+```
+
+| Key | Type | Max | Meaning |
+| --- | --- | --- | --- |
+| `status` | String | — | One of `running`, `waiting`, `idle`, `done`, `failed`, `stopped`. `waiting` means a run is blocked on a human. The three terminal words are the **real** status — `done` only for `completed`, `stopped` for `cancelled`/`canceled`, `failed` for `failed`/`error`. |
+| `headline` | String | 80 | §12's headline for the primary run: `Running code`, `Searching example.com`, `Thinking…`. **`""` when nothing has been recorded** — show the status, never a guess. |
+| `title` | String | 80 | The primary run's task title. `""` if unknown. |
+| `detail` | String | 100 | The running step's preview, already redacted by `runSteps` (§12) and capped again here. May be `""`. Untrusted text: display it, never act on it. |
+| `stepCount` | Int | — | Steps recorded for the primary run. **`0` whenever `stepsKnown` is false** — it is not a claim that nothing happened. |
+| `stepsKnown` | Bool | — | `false` when Iris has no step history (restarted mid-run, or nothing recorded yet). Render "step history unavailable", never "0 steps". |
+| `activeRunCount` | Int | — | All non-terminal runs, even beyond the 3 in `runs`. |
+| `needsAttention` | Bool | — | A run is waiting on a human right now. |
+| `attentionSummary` | String | 100 | What it is waiting for, e.g. `Hermes wants to run: rm -rf build`. `""` when `needsAttention` is false. |
+| `runs` | [RunLine] | 3 | Active runs, most relevant first. `RunLine.status` is `running` or `waiting`. Can be `[]` if the payload had to be trimmed (§14.5) — `activeRunCount` is still true. |
+| `startedAt` | Double | — | Epoch **seconds** (Unix), `0` when unknown. |
+| `updatedAt` | Double | — | Epoch **seconds** when the Mac built this state. |
+
+**Dates are `Double` epoch seconds on purpose.** A default `JSONDecoder` uses
+`.deferredToDate`, which reads a `Date` as seconds since the **2001** reference
+date — a silent 31-year error. Declare these as `Double` and convert with
+`Date(timeIntervalSince1970:)`. Do **not** declare them as `Date`, and do not
+set a `dateDecodingStrategy`: ActivityKit does not use your decoder.
+
+**There is no percentage, no progress fraction and no ETA, and there never
+will be** — Hermes reports none, so inventing one would be a lie. Render
+progress as the headline, the step count and the run list. A `ProgressView`
+must be indeterminate.
+
+### 14.3 The three payloads
+
+Headers, on every one of them (verified against Apple's sandbox host):
+
+```
+apns-push-type: liveactivity
+apns-topic:     app.iris.liveprototype.push-type.liveactivity
+apns-priority:  5 (routine progress) or 10 (needs-attention, start, end)
+```
+
+`apns-priority: 5` does not count against Apple's hourly ActivityKit budget;
+`10` does. The Mac spends `10` only on a start, on an `end`, and on the moment
+a run becomes blocked on a human.
+
+**start** (push-to-start only — §14.4). Apple requires an `alert` here, so an
+activity never appears without the person being told:
+
+```json
+{
+  "aps": {
+    "timestamp": 1789870577,
+    "event": "start",
+    "content-state": {
+      "status": "running", "headline": "Running code",
+      "title": "Summarize the quarterly numbers", "detail": "python analyze.py",
+      "stepCount": 3, "stepsKnown": true, "activeRunCount": 1,
+      "needsAttention": false, "attentionSummary": "",
+      "runs": [{ "id": "run-8f21", "title": "Summarize the quarterly numbers", "status": "running", "headline": "Running code" }],
+      "startedAt": 1789870500, "updatedAt": 1789870577
+    },
+    "attributes-type": "IrisRunActivityAttributes",
+    "attributes": { "title": "Hermes", "macName": "studio", "deviceId": "8d153b5d…" },
+    "stale-date": 1789870697,
+    "relevance-score": 100,
+    "input-push-token": 1,
+    "alert": { "title": "Hermes is working", "body": "Summarize the quarterly numbers", "sound": "default" }
+  }
+}
+```
+
+**update** (the common case):
+
+```json
+{
+  "aps": {
+    "timestamp": 1789870620,
+    "event": "update",
+    "content-state": {
+      "status": "waiting", "headline": "Running code",
+      "title": "Deploy the site", "detail": "rm -rf build",
+      "stepCount": 7, "stepsKnown": true, "activeRunCount": 2,
+      "needsAttention": true, "attentionSummary": "Hermes wants to run: rm -rf build",
+      "runs": [
+        { "id": "run-9a02", "title": "Deploy the site", "status": "waiting", "headline": "Running code" },
+        { "id": "run-8f21", "title": "Summarize the quarterly numbers", "status": "running", "headline": "Searching example.com" }
+      ],
+      "startedAt": 1789870540, "updatedAt": 1789870620
+    },
+    "stale-date": 1789870740,
+    "relevance-score": 100,
+    "alert": { "title": "Hermes needs you", "body": "Hermes wants to run: rm -rf build", "sound": "default" }
+  }
+}
+```
+
+The `alert` appears **only** on the update where `needsAttention` flips to
+true. Routine progress updates have no `alert` and `"relevance-score": 50`.
+
+**end** (always sent, with the real final status):
+
+```json
+{
+  "aps": {
+    "timestamp": 1789870900,
+    "event": "end",
+    "content-state": {
+      "status": "failed", "headline": "", "title": "Deploy the site", "detail": "",
+      "stepCount": 0, "stepsKnown": false, "activeRunCount": 0,
+      "needsAttention": false, "attentionSummary": "", "runs": [],
+      "startedAt": 1789870540, "updatedAt": 1789870900
+    },
+    "dismissal-date": 1789872700
+  }
+}
+```
+
+An `end` carries **no `stale-date`** — an ended activity cannot go stale.
+
+### 14.4 Which side starts the activity, and when
+
+| Situation | Who starts it |
+| --- | --- |
+| The app is in the foreground (user is in Iris, dispatches a task) | **The phone**, locally: `Activity.request(attributes:content:pushType: .token)`. Then `PUT /link/live-activity` with the update token. |
+| A run this phone dispatched starts while the app is suspended | **The Mac**, push-to-start — but only if the device registered a push-to-start token (`PUT /link/live-activity/start-token`) **and** the Mac holds no update token for it. |
+| A desktop-dispatched run starts | **Nobody.** The Mac never starts an activity uninvited for its own work; if an activity exists, the run simply appears in the next update. |
+
+The Mac will not push-to-start twice within **60 s**, so the phone has time to
+be woken, start the activity and register its update token. After an `end`,
+the Mac forgets that activity's token, so the next device-origin run may
+push-to-start again.
+
+### 14.5 Cadence, staleness and ending
+
+- **Coalescing: at most one update every 8 seconds per activity.** Hermes can
+  emit many events a second; the Mac pushes only on a *meaningful* change
+  (headline, step count, a step starting or finishing, status, run count, an
+  approval appearing or clearing) and collapses everything inside the window.
+- **Trailing flush.** A change that arrives inside the window is not lost: a
+  flush fires at the end of it carrying the **latest** state. The final state
+  always lands.
+- **Two things never wait for the window**: an approval appearing
+  (`needsAttention` → true) and the last run finishing.
+- **`stale-date` = the push's timestamp + 120 s**, advanced on every
+  non-terminal push. If the Mac sleeps, loses Tailscale or quits, the activity
+  crosses into `.stale` and the phone **must** say so — "Iris hasn't checked
+  in" — rather than leaving a spinner implying Hermes is still working.
+  Observe `activityStateUpdates` / `Activity.activityState == .stale`.
+- **`end` is always sent** when the last active run finishes, with the real
+  terminal status. `dismissal-date` is **+5 minutes** for a `done` activity and
+  **+30 minutes** for `failed` or `stopped` — a bad ending is the one you are
+  most likely to have missed.
+- **Payload budget.** Apple's limit is 4096 bytes. The Mac builds to 3200 and,
+  if a long title would exceed it, sheds `runs` first, then `detail`, then
+  shortens the strings. The counts and the status are never dropped. A typical
+  payload is ~500 bytes.
+- **A push can simply not arrive** (no network, throttling). Also update the
+  activity locally from the app whenever it is in the foreground, using the
+  same `/link/tasks` data — do not rely on push alone.
+
+### 14.6 `GET /link/summary` — the home-screen widget's data source
+
+Bearer-authed like everything else. Small by design: counts, two lines, one
+flag. **No step lists, no result text, no output.**
+
+```json
+{
+  "active_count": 2,
+  "waiting_count": 1,
+  "finished_today_count": 4,
+  "active_run": {
+    "run_id": "run-8f21",
+    "title": "Summarize the quarterly numbers",
+    "headline": "Running code",
+    "needs_attention": true
+  },
+  "last_finished": {
+    "run_id": "run-7c10",
+    "title": "Book a table",
+    "status": "completed",
+    "finished_at": 1758240301000
+  },
+  "hermesReachable": true,
+  "generated_at": 1758240400000
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `active_count` | Non-terminal runs in the desktop's Hermes session. |
+| `waiting_count` | How many of those are blocked on a human. |
+| `finished_today_count` | Terminal runs whose status last changed in the past 24 h. |
+| `active_run` | The most relevant active run — blocked on a human first, else most recently updated — or `null`. `headline` is §12's headline and is `""` when nothing was recorded. |
+| `last_finished` | The most recent terminal run, or `null`. `status` is the **real** one. `finished_at` is epoch **milliseconds**. |
+| `hermesReachable` | A fresh, time-bounded probe (same as `/link/status`). |
+| `generated_at` | Epoch **milliseconds** on the Mac when this was built. Show a relative "as of" when the data is older than a few minutes. |
+
+Errors: `401 not_paired` · `405 method_not_allowed` · `501 tasks_unavailable`
+(the desktop build has no summary handler).
+
+**How the widget stays fresh.** There is no reliable way to push a widget
+reload: a silent/background push is best-effort, is throttled hard, and cannot
+be counted on. So:
+
+1. Give the timeline provider a modest policy — `.after(Date().addingTimeInterval(15 * 60))`,
+   shorter only while `active_count > 0`. iOS will honor it approximately, on
+   its own budget, and will refuse to be pushed faster.
+2. Call `WidgetCenter.shared.reloadAllTimelines()` whenever the **app** runs
+   and has fresh data: on launch, on foreground, after any `/link/tasks` poll
+   that changed something, and when a push is received in the foreground.
+3. The widget must show **when** its data is from (`generated_at`) rather than
+   implying it is live. If `generated_at` is old, say so. That honesty is the
+   whole difference between a widget and the Live Activity.
+4. Shared storage between the app and the widget extension is the **only**
+   reason to add an App Group (§14.7).
+
+### 14.7 Routes
+
+All bearer-authed with the device credential (§1). No token registered here is
+ever returned by any route or appears in any listing, and revoking the device
+deletes all of them along with its credential hash.
+
+**`PUT /link/live-activity/start-token`** — the per-device **push-to-start**
+token (iOS 17.2+, `Activity<T>.pushToStartTokenUpdates`).
+
+```json
+{ "token": "<hex>", "environment": "sandbox" | "production" }
+```
+`200` → `{"ok": true, "pushToStartEnabled": true, "environment": "sandbox"}`
+
+**`DELETE /link/live-activity/start-token`** → `{"ok": true, "pushToStartEnabled": false}`
+
+**`PUT /link/live-activity`** — the per-**activity** update token
+(`activity.pushTokenUpdates`).
+
+```json
+{ "activity_id": "<Activity.id>", "token": "<hex>", "environment": "sandbox" }
+```
+`200` → `{"ok": true, "activity_id": "…", "liveActivityEnabled": true}`
+
+Registering the same `activity_id` again **replaces** its token — which is
+exactly what `pushTokenUpdates` hands you mid-activity. Up to 3 activities are
+kept per device; the oldest is evicted.
+
+**`DELETE /link/live-activity`** — no query string clears **all** of them (the
+user turned Live Activities off). `?activity_id=<id>` removes just that one.
+`200` → `{"ok": true, "liveActivityEnabled": false}`
+
+**`GET /link/summary`** — §14.6.
+
+Errors on the registration routes: `400 invalid_token` (not hex / implausible
+length) · `400 invalid_activity_id` (empty, or not `[A-Za-z0-9._:-]`) ·
+`400 invalid_environment` · `400 invalid_json` · `415` for a non-JSON
+`Content-Type` · `401 not_paired` · `405 method_not_allowed` ·
+`501 push_unavailable`.
+
+`environment` is derived from the build exactly as in §11.3 — the Live
+Activity token lives in the same APNs environment as the alert token.
+
+### 14.8 What the phone must implement
+
+**Info.plist**
+- `NSSupportsLiveActivities` = `YES`. Without it there are no Live Activities
+  at all.
+- `NSSupportsLiveActivitiesFrequentUpdates` = **not required**, and Iris does
+  not rely on it. The 8-second coalescing window plus `apns-priority: 5` is
+  designed to stay inside Apple's ordinary budget. If you add it anyway,
+  respect `ActivityAuthorizationInfo().frequentPushesEnabled` (a person can
+  turn it off in Settings) and do not assume faster updates.
+
+**Targets and capabilities**
+- A **Widget Extension** target is required — it renders both the Live Activity
+  (`ActivityConfiguration`) and the home-screen widget. The system wakes this
+  extension to draw the activity when a push arrives.
+- The **Push Notifications** capability (`aps-environment`) — the same one §11
+  already needs. No new entitlement, and **no background mode**.
+- An **App Group** only if the widget must read cached data written by the app.
+  If the widget fetches `/link/summary` itself in its timeline provider, it
+  needs the device credential, which lives in the Keychain — and sharing a
+  Keychain item with an extension needs a **Keychain Sharing** group, not an
+  App Group. Prefer: the app fetches, writes the summary JSON to an App Group
+  container, calls `reloadAllTimelines()`, and the widget only reads. That is
+  the one genuine reason to add an App Group; do not add one otherwise.
+
+**Code**
+- Start with `Activity.request(attributes:content:pushType: .token)` — `.token`
+  is what produces an update token. Without it the Mac can never update the
+  activity.
+- Observe `activity.pushTokenUpdates` (an async sequence) and `PUT
+  /link/live-activity` on **every** value, with `activity.id` as
+  `activity_id`. The token changes during an activity's life; a stale one is
+  dead.
+- Observe `Activity<IrisRunActivityAttributes>.pushToStartTokenUpdates` and
+  `PUT /link/live-activity/start-token` on every value. You do **not** have to
+  start an activity to receive this token.
+- Observe `Activity.activityStateUpdates`; on `.ended` or `.dismissed`,
+  `DELETE /link/live-activity?activity_id=…`.
+- On a push-to-start wake, the system hands you a fresh update token through
+  `pushTokenUpdates` — register it immediately; you have background runtime
+  for exactly that.
+- Tapping the activity opens the run: use `run_id` from `ContentState.runs`, or
+  `active_run.run_id` from `/link/summary` for the widget, then §4 as usual.
+
+**Truthfulness rules (non-negotiable)**
+1. Never render a percentage, a progress bar with a value, or an ETA. Hermes
+   reports none.
+2. `headline == ""` → show the status, not a guess.
+3. `stepsKnown == false` → say the step history is unavailable. Never "0 steps".
+4. `status` is the real terminal status. `failed` is not "finished".
+5. When the activity is `.stale`, say the Mac stopped reporting. Do not keep
+   animating as if work continues.
+6. A widget shows `generated_at`, not a pretense of being live.
+
+---
+
+## 15. Failure reasons and recovery
+
+Every Hermes failure used to arrive at the phone as the same sentence —
+*"Hermes is not reachable from your Mac. Nothing was sent."* — or as a bare
+`FAILED`. That sentence was frequently a lie: the gateway's HTTP health check
+stayed green while the interactive backend crash-looped, and it was flatly
+wrong when Hermes was running and had simply refused.
+
+The desktop now classifies every failure in one place
+(`electron/hermesFailure.mjs`) and hands the phone a code, one plain sentence,
+and a machine hint for what would fix it.
+
+### 15.1 The codes
+
+`code` is stable, snake_case, and part of this contract. `recovery` is one of
+`start_new_chat`, `retry`, `check_mac`, `none`.
+
+| `code` | What actually happened | `recovery` | HTTP (at dispatch) |
+|---|---|---|---|
+| `session_in_use` | Hermes allows one client per chat, and something else holds this one (usually the Hermes Desktop app). Hermes is healthy. | `start_new_chat` | 409 |
+| `backend_start_failed` | `hermes serve` would not come up — timed out, exited before ready, or no usable runtime. The message names a cause when the log tail gives one, e.g. *"Hermes' backend would not start (MCP server 'strava' failed to authenticate)."* | `check_mac` | 502 |
+| `model_unreachable` | Hermes is up; its AI model service is not. | `retry` | 502 |
+| `auth_failed` | The shared `API_SERVER_KEY` between Iris and Hermes does not match (401). | `check_mac` | 502 |
+| `gateway_unreachable` | Nothing answered on `127.0.0.1:8642`. **This is the only code that means "Hermes is not reachable".** | `check_mac` | 502 |
+| `run_limit` | Hermes hit its iteration budget before finishing. | `retry` | 409 |
+| `stopped_by_user` | Somebody stopped the run. | `none` | 409 |
+| `unknown` | Nothing matched. The sentence quotes the original first line; it is never dropped. | `retry` | 502 |
+
+Two further codes are refusals rather than Hermes failures:
+`not_a_live_run` (409) — a transcript-restored run was asked to do something
+only a live run can do — and `retry_not_allowed` (409), see §15.3.
+
+The phone MUST NOT print "Hermes is not reachable" for any code other than
+`gateway_unreachable` (or a transport-level `LinkError.unreachable`, which is
+about the *Mac*, not about Hermes).
+
+### 15.2 The `failure` object
+
+`GET /link/tasks`, `GET /link/tasks/:id` and `GET /link/tasks/:id/result` carry
+`failure` on a run whose status is `failed` or `error`, and `null` on every
+other run. It is additive: an older phone ignores it.
+
+```json
+{
+  "run_id": "iris_9c1a…",
+  "status": "failed",
+  "failure": {
+    "code": "session_in_use",
+    "message": "That chat is open in Hermes Desktop. Close it there, or I can start a new chat.",
+    "recovery": "start_new_chat",
+    "detail": "This chat is open in another Hermes window/terminal. Use it there, or start a new chat here."
+  }
+}
+```
+
+- `message` — one plain sentence, in Iris's voice, safe to speak and safe on a
+  lock screen. Redacted, control-character-free, ≤ 240 chars.
+- `detail` — the sanitized first line of Hermes' own text, ≤ 400 chars. Show it
+  behind a disclosure for debugging; never lead with it.
+- Decode tolerantly: an unknown `code` is shown with its `message` if there is
+  one, and otherwise falls back to the generic sentence **while keeping
+  `detail`**.
+
+A dispatch failure carries the same vocabulary in the error body:
+`{ "error": "<code>", "message": "…", "recovery": "…" }`.
+
+The `run_complete` push (§11) adds `failure_code` and `recovery`, and its alert
+body is the `message` rather than the task title, so a locked phone learns the
+reason without opening anything. It still carries no result text.
+
+### 15.3 `POST /link/sessions/new` — the one-tap recovery
+
+Bearer-authed, rate limited to 6 per minute per device.
+
+```
+POST /link/sessions/new
+{ "retry_run_id": "iris_9c1a…" }     // optional
+→ 200 { "session_id": "api_…", "title": "", "run_id": "iris_2f7b…" }
+```
+
+It creates a fresh Hermes chat through the same function the desktop's session
+switcher uses and pins it.
+
+> **This deliberately changes the pinned session for the desktop as well.**
+> There is one pinned chat, not one per surface — that is what "start a new
+> chat" means. The Mac emits its `hermes_session_changed` renderer event so the
+> desktop's Work Stream follows without a restart. The old chat is untouched
+> and stays in Hermes.
+
+With `retry_run_id`, and **only** when that run is FAILED, dispatched by *this*
+device, and failed with `session_in_use`, its exact brief is re-dispatched into
+the new chat and `run_id` comes back too. Every other case is a `409`:
+
+| Case | `error` |
+|---|---|
+| Not failed | `retry_not_allowed` |
+| Another device's run | `retry_not_allowed` |
+| Failed for a different reason | `retry_not_allowed` |
+| A `history:…` id | `not_a_live_run` |
+| Unknown id | `task_unknown` (404) |
+
+If the chat was created but the retry could not be dispatched, the response
+still carries `session_id` plus `retry_error` / `retry_message`. The new chat
+really was made; say so, and do not claim the work restarted.
+
+**There is no tool for this route.** The model cannot reach it. Starting a new
+chat is a deliberate tap on a trusted surface, confirmed once. If the user asks
+Iris by voice to start a new chat, Iris tells them to tap the button.
+
+### 15.4 `SYSTEM_EVENT_HERMES_COMPLETE` for a failed run
+
+For a failed run the event replaces the "summarize the result" block entirely:
+
+```
+SYSTEM_EVENT_HERMES_COMPLETE
+run_id: <id>
+status: failed
+failure_code: session_in_use
+recovery: start_new_chat
+instructions_to_iris:
+- The task did NOT run. Tell <name> that, in one short sentence, and give the reason below in plain words.
+- Say the reason as written. Do not restate it as a network problem, and do not say Hermes is unreachable unless the reason says so.
+- You have NO result. Do not summarize, predict, or invent one.
+- Offer the fix out loud, then stop: tell <name> they can tap "Start a new chat and try again" on the run in the Iris app.
+- You CANNOT start a new chat yourself and there is no tool for it. If they ask you to, say it has to be the button — it changes which chat the Mac uses too.
+failure_reason:
+That chat is open in Hermes Desktop. Close it there, or I can start a new chat.
+```
+
+There is no `authoritative_hermes_result` line, because there is no result.
+
+---
+
+## 16. Restored runs and earlier chats
+
+The desktop's Work Stream shows the run registry **merged** with runs rebuilt
+from the pinned session's Hermes transcript. `GET /link/tasks` used to show the
+registry alone, so the moment the pinned session changed the phone showed one
+run where the Mac showed thirteen.
+
+### 16.1 The merge rule
+
+`GET /link/tasks` now returns, for the pinned session:
+
+1. every registry run, then
+2. every transcript-rebuilt run whose `run_id` is not already present **and**
+   whose task text (lowercased, trimmed) does not match a registry run's,
+
+sorted by `updated_at` descending and capped at 50. This is the same rule as
+the desktop's `fetchHermesHistory()`.
+
+The transcript read is cached for ~5 s, so a 5 s list poll does not re-read a
+2000-message transcript each time. **A transcript failure degrades to
+registry-only — never to an error.** Dispatch never waits on it.
+
+### 16.2 What a restored run looks like
+
+```json
+{
+  "run_id": "history:20260916_174926_797a3b:msg_412",
+  "task": "Summarise yesterday's commits",
+  "status": "completed",
+  "origin": "history",
+  "session_id": "20260916_174926_797a3b",
+  "restored": true,
+  "read_only": true,
+  "updated_at": 1789947620033,
+  "headline": "",
+  "step_count": 6,
+  "pending_approval": null,
+  "failure": null
+}
+```
+
+- `origin: "history"` is a new value in the `origin` vocabulary (§4), additive.
+- Timestamps are epoch **milliseconds**, like every other Link timestamp.
+- The list carries no step array and no output text.
+
+`GET /link/tasks/:id` and `GET /link/tasks/:id/result` resolve a `history:…`
+id from the transcript, so a restored row opens like any other. The run id
+contains colons; the phone percent-encodes the path segment, and the desktop's
+validator still rejects separators, control characters and traversal.
+
+### 16.3 What a restored run cannot do
+
+`stop`, `approval`, `announced` and the `retry_run_id` of §15.3 all refuse a
+`history:…` id with `409 not_a_live_run`. A restored run is a reconstruction of
+a finished conversation: there is nothing to stop, approve, announce or retry.
+
+The phone MUST NOT let a restored (or earlier) run trigger a completion
+announcement, a local notification, the active-runs strip, or a Live Activity.
+They are history, not news.
+
+### 16.4 Earlier chats — `GET /link/tasks?scope=all`
+
+When the pinned session changes, every run under the previous session becomes
+invisible in both apps. `scope=all` adds them as a **separate** array:
+
+```json
+{ "tasks": [ … ], "earlier": [ { "…": "…", "session_id": "…", "read_only": true, "restored": false } ] }
+```
+
+`earlier` holds registry runs from other sessions, newest first, capped at 100,
+each with its `session_id` so the phone can group them. They are read-only.
+
+Without `scope=all` the response is byte-for-byte what it always was, so an
+older phone build is unaffected.
