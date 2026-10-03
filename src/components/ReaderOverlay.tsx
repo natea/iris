@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { ChevronDown, Wrench, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { irisUrlTransform } from "../lib/links";
 import type { TaskCard } from "../types";
 import { normalizeMarkdown, shortRunId } from "../lib/tasks";
 import type { HandState } from "../hooks/useHandControl";
@@ -203,6 +204,7 @@ export default function ReaderOverlay({
           <div className={`markdown-body ${task.error ? "error" : ""}`}>
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
+              urlTransform={irisUrlTransform}
               components={{
                 a: ({ href, children }) => (
                   <a

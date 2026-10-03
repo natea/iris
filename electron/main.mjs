@@ -40,6 +40,7 @@ import {
   mediaPermissionAllowed,
   safeExternalUrl,
 } from "./windowSecurity.mjs";
+import { vaultLinkInstructions } from "./vaultLinks.mjs";
 import { LiveToolCoordinator } from "./liveToolCoordinator.mjs";
 import { readStoredHermesResult } from "./hermesResultService.mjs";
 import {
@@ -1163,7 +1164,8 @@ async function submitHermesTask({ task, urgency = "normal", origin = "desktop" }
     "You are invoked from Iris voice. Work autonomously and report final results. " +
     "You have a full interactive channel back to the user: when a meaningful decision, missing requirement, dangerous command approval, sudo password, or secret is genuinely required, use the appropriate native Hermes interaction instead of guessing or timing out. " +
     `Local filesystem safety: stay within the session's configured workspace and never recursively enumerate the home directory or its parents. Do not enter or search these protected locations unless the user explicitly named the exact folder as part of this task: ${protectedPaths.join(", ")}. The Downloads folder remains available when relevant. Never run a broad wildcard search from home. ` +
-    "This session may contain your own earlier runs: when the task repeats or extends previous work, reuse those results, scripts, and resolved IDs instead of re-deriving everything; re-check only what could have changed.";
+    "This session may contain your own earlier runs: when the task repeats or extends previous work, reuse those results, scripts, and resolved IDs instead of re-deriving everything; re-check only what could have changed." +
+    (brainRoot() ? ` ${vaultLinkInstructions(brainRoot())}` : "");
   const sessionId = hermesSessionId();
   emitEvent({
     type: "hermes_task_update",
